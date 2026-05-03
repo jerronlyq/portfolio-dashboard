@@ -1,0 +1,980 @@
+// Default Mock Data
+const DEFAULT_CSV_DATA = `Ticker,Category,Total Cost Price,Shares,Currency
+AAPL,Tech,15000.00,100,USD
+MSFT,Tech,14000.00,50,USD
+VOO,ETF,76000.00,200,USD
+TSLA,Auto,6000.00,30,USD
+NVDA,Tech,16000.00,40,USD`;
+
+const DEFAULT_REALIZED_DATA = `Ticker,Category,Total Buy Cost,Total shares,Total Sell Price,Commission fees,Currency
+NFLX,Tech,1500.00,10,2500.00,5.00,USD
+GOOGL,Tech,3000.00,25,3100.00,0,USD
+DBS,Bank,5000.00,100,6000.00,10.00,SGD`;
+
+// Per-ticker line colours — shared between chips and chart datasets
+const CHART_COLORS = ['#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#ec4899', '#6366f1', '#f97316'];
+
+let allocationChartInstance = null;
+let historyChartInstance    = null;
+
+// ── Global State ──────────────────────────────────────────────────────────────
+let activeCurrency        = 'USD';
+let currentSgdRate        = 1.35;
+let currentTab            = 'active';
+let currentSort           = { column: null, direction: 'asc', table: null };
+let globalActiveData      = [];
+let globalRealizedData    = [];
+let globalSnapshotData    = null;   // { dates[], tickers[], series{} }
+let lastPriceUpdate       = null;
+let activeHistoryRange    = 'All';
+let selectedHistoryTickers = new Set();
+
+// ── Module-Level Utilities ────────────────────────────────────────────────────
+
+const parseNum = (val) => parseFloat(String(val).replace(/[^0-9.-]+/g, '')) || 0;
+
+const findValue = (row, keys) => {
+  const match = Object.keys(row).find(k =>
+    keys.some(key => k.toLowerCase().includes(key.toLowerCase()))
+  );
+  return match ? row[match] : '';
+};
+
+const nameOf = (ticker) => TICKER_NAME_MAP[ticker] || ticker;
+
+// Auto-appends .SI for SGD-denominated tickers missing an exchange qualifier
+const normalizeTicker = (raw, currency = 'USD') => {
+  let t = String(raw).trim().toUpperCase();
+  if (t === 'BTCUSD') return 'BTC-USD';
+  if (t === 'ETHUSD') return 'ETH-USD';
+  if (t === 'SOLUSD') return 'SOL-USD';
+  if (currency === 'SGD' && !t.includes('.')) return t + '.SI';
+  return t;
+};
+
+const formatCurrency = (value) => {
+  let displayVal = value;
+  let currencyCode = 'USD';
+  if (activeCurrency === 'SGD') {
+    displayVal = value * currentSgdRate;
+    currencyCode = 'SGD';
+  }
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency', currency: currencyCode,
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  }).format(displayVal);
+};
+
+// Compact axis-label formatter: $182k, $1.2M, etc.
+const formatAxisValue = (val) => {
+  const converted = activeCurrency === 'SGD' ? val * currentSgdRate : val;
+  const symbol    = activeCurrency === 'SGD' ? 'S$' : '$';
+  if (converted >= 1_000_000) return `${symbol}${(converted / 1_000_000).toFixed(1)}M`;
+  if (converted >= 1_000)     return `${symbol}${(converted / 1_000).toFixed(0)}k`;
+  return `${symbol}${converted.toFixed(0)}`;
+};
+
+function updateLastRefreshed() {
+  lastPriceUpdate = new Date();
+  const el = document.getElementById('last-updated');
+  if (el) el.textContent = `Updated: ${lastPriceUpdate.toLocaleTimeString()}`;
+}
+
+// ── Source Status Pills ───────────────────────────────────────────────────────
+
+function updateSourcePills() {
+  [
+    { id: 'pill-active',    key: 'saved_csv_url',      cls: 'pill-cyan'   },
+    { id: 'pill-realized',  key: 'saved_realized_url', cls: 'pill-purple' },
+    { id: 'pill-snapshots', key: 'saved_snapshot_url', cls: 'pill-green'  },
+  ].forEach(({ id, key, cls }) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.className = `source-pill ${localStorage.getItem(key) ? cls : ''}`;
+  });
+}
+
+// ── Exchange Rate ─────────────────────────────────────────────────────────────
+
+async function fetchExchangeRate() {
+  try {
+    const response = await fetch('https://open.er-api.com/v6/latest/USD');
+    const data = await response.json();
+    if (data?.rates?.SGD) {
+      currentSgdRate = data.rates.SGD;
+      const display = document.getElementById('exchange-rate-display');
+      if (display) display.textContent = `1 USD = ${currentSgdRate.toFixed(4)} SGD`;
+    }
+  } catch (e) {
+    console.error('Failed to fetch live exchange rate; using 1.35 fallback.', e);
+  }
+}
+
+// ── CORS Proxy Chain ──────────────────────────────────────────────────────────
+
+const CORS_PROXIES = [
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  url => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
+];
+
+async function fetchWithProxy(targetUrl) {
+  for (const proxyFn of CORS_PROXIES) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      const res = await fetch(proxyFn(targetUrl), { signal: controller.signal });
+      clearTimeout(timer);
+      if (res.ok) return res;
+    } catch (e) { /* try next proxy */ }
+  }
+  return null;
+}
+
+// ── Offline Ticker Name Dictionary ───────────────────────────────────────────
+
+const TICKER_NAME_MAP = {
+  'AAPL': 'Apple Inc.', 'MSFT': 'Microsoft Corp.', 'NVDA': 'NVIDIA Corp.', 'AMZN': 'Amazon.com Inc.',
+  'GOOGL': 'Alphabet Inc. (Class A)', 'GOOG': 'Alphabet Inc. (Class C)', 'META': 'Meta Platforms Inc.',
+  'BRK.B': 'Berkshire Hathaway', 'TSLA': 'Tesla Inc.', 'UNH': 'UnitedHealth Group',
+  'JNJ': 'Johnson & Johnson', 'XOM': 'Exxon Mobil Corp.', 'JPM': 'JPMorgan Chase & Co.',
+  'V': 'Visa Inc.', 'PG': 'Procter & Gamble Co.', 'HD': 'The Home Depot Inc.',
+  'CVX': 'Chevron Corp.', 'MA': 'Mastercard Inc.', 'ABBV': 'AbbVie Inc.',
+  'LLY': 'Eli Lilly and Co.', 'MRK': 'Merck & Co.', 'PEP': 'PepsiCo Inc.',
+  'KO': 'The Coca-Cola Co.', 'AVGO': 'Broadcom Inc.', 'PFE': 'Pfizer Inc.',
+  'TMO': 'Thermo Fisher Scientific', 'COST': 'Costco Wholesale Corp.', 'CSCO': 'Cisco Systems Inc.',
+  'MCD': "McDonald's Corp.", 'CRM': 'Salesforce Inc.', 'DHR': 'Danaher Corp.',
+  'BAC': 'Bank of America Corp.', 'ABT': 'Abbott Laboratories', 'ACN': 'Accenture plc',
+  'LIN': 'Linde plc', 'ORCL': 'Oracle Corp.', 'ADBE': 'Adobe Inc.',
+  'NFLX': 'Netflix Inc.', 'DIS': 'The Walt Disney Co.', 'INTC': 'Intel Corp.',
+  'AMD': 'Advanced Micro Devices', 'CMCSA': 'Comcast Corp.', 'TXN': 'Texas Instruments Inc.',
+  'VZ': 'Verizon Communications Inc.', 'NKE': 'NIKE Inc.', 'WMT': 'Walmart Inc.',
+  'QCOM': 'QUALCOMM Inc.', 'T': 'AT&T Inc.', 'BA': 'The Boeing Co.', 'IBM': 'International Business Machines',
+  'NOW': 'ServiceNow Inc.', 'UBER': 'Uber Technologies', 'SQ': 'Block Inc.',
+  'PLTR': 'Palantir Technologies', 'SNOW': 'Snowflake Inc.', 'SHOP': 'Shopify Inc.',
+  'VOO': 'Vanguard S&P 500 ETF', 'SPY': 'SPDR S&P 500 ETF', 'QQQ': 'Invesco QQQ Trust',
+  'IVV': 'iShares Core S&P 500 ETF', 'VTI': 'Vanguard Total Stock Market ETF',
+  'ARKK': 'ARK Innovation ETF', 'SCHD': 'Schwab US Dividend Equity ETF',
+  'DBS': 'DBS Group Holdings Ltd', 'D05.SI': 'DBS Group Holdings Ltd',
+  'OCBC': 'OCBC Bank', 'O39.SI': 'OCBC Bank',
+  'UOB': 'United Overseas Bank (UOB)', 'U11.SI': 'United Overseas Bank (UOB)',
+  'Z74.SI': 'Singtel', 'C38U.SI': 'CapitaLand Integrated Commercial Trust',
+  'BTC-USD': 'Bitcoin', 'ETH-USD': 'Ethereum', 'SOL-USD': 'Solana'
+};
+
+// ── Live Price Fetching ───────────────────────────────────────────────────────
+
+async function fetchLivePrices(tickers) {
+  const dictionary = {};
+  if (!tickers || tickers.length === 0) return dictionary;
+
+  const cleanTickers = [...new Set(
+    tickers
+      .map(t => normalizeTicker(t))
+      .filter(t => t && t !== 'UNKNOWN' && !t.includes('LOADING'))
+  )];
+  if (cleanTickers.length === 0) return dictionary;
+
+  const joined = cleanTickers.join(',');
+
+  try {
+    const sparkUrl = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${joined}&range=1d&interval=1d`;
+    const res = await fetchWithProxy(sparkUrl);
+    if (res) {
+      const data = await res.json();
+      if (data) {
+        Object.keys(data).forEach(symbol => {
+          const params = data[symbol];
+          if (params?.close?.length > 0) {
+            dictionary[symbol.toUpperCase()] = {
+              price: params.close[params.close.length - 1],
+              name: nameOf(symbol.toUpperCase())
+            };
+          }
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('Spark price fetch failed.', e);
+  }
+
+  await Promise.all(cleanTickers.map(async (ticker) => {
+    if (TICKER_NAME_MAP[ticker]) {
+      if (dictionary[ticker]) dictionary[ticker].name = TICKER_NAME_MAP[ticker];
+      else dictionary[ticker] = { price: 0, name: TICKER_NAME_MAP[ticker] };
+      return;
+    }
+    try {
+      const searchUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${ticker}`;
+      const res = await fetchWithProxy(searchUrl);
+      if (res) {
+        const searchData = await res.json();
+        if (searchData?.quotes?.length > 0) {
+          const match = searchData.quotes.find(q => q.symbol === ticker) || searchData.quotes[0];
+          const realName = match.shortname || match.longname || ticker;
+          if (dictionary[ticker]) dictionary[ticker].name = realName;
+          else dictionary[ticker] = { price: 0, name: realName };
+        }
+      }
+    } catch (e) {
+      console.warn('Name lookup failed for', ticker);
+    }
+  }));
+
+  return dictionary;
+}
+
+// ── Refresh Active Prices In-Place ───────────────────────────────────────────
+
+async function refreshPrices() {
+  if (globalActiveData.length === 0) return;
+  const loader = document.getElementById('loading');
+  if (loader) {
+    loader.querySelector('p').textContent = 'Refreshing live prices...';
+    loader.classList.remove('hidden');
+  }
+
+  const tickers = globalActiveData.map(item => normalizeTicker(item.ticker, item.originalBase));
+  const prices  = await fetchLivePrices(tickers);
+
+  globalActiveData = globalActiveData.map(item => {
+    const cleanTicker = normalizeTicker(item.ticker, item.originalBase);
+    const dictData    = prices[cleanTicker];
+    if (!dictData?.price) return item;
+
+    let mktPrice = dictData.price;
+    if (item.originalBase === 'SGD' && currentSgdRate > 0) mktPrice /= currentSgdRate;
+
+    const totalCostVal = item.costPrice * item.shares;
+    const totalMktVal  = item.shares * mktPrice;
+    const profit       = totalMktVal - totalCostVal;
+    const profitPct    = totalCostVal > 0 ? (profit / totalCostVal) * 100 : 0;
+
+    return { ...item, mktPrice, totalMktVal, profit, profitPct, source: 'Yahoo' };
+  });
+
+  updateLastRefreshed();
+  if (loader) loader.classList.add('hidden');
+  if (currentTab === 'active') renderDashboard();
+}
+
+// ── Application Init ──────────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', async () => {
+  await fetchExchangeRate();
+  try { if (typeof feather !== 'undefined') feather.replace(); } catch (e) {}
+
+  // ── Data sources collapsible panel ───────────────────────────────────────
+
+  const sourcesToggle = document.getElementById('sources-toggle');
+  const sourcesBody   = document.getElementById('sources-body');
+  const chevron       = document.getElementById('sources-chevron');
+
+  function openSourcesPanel() {
+    sourcesBody.classList.add('open');
+    if (chevron) chevron.style.transform = 'rotate(180deg)';
+  }
+  function closeSourcesPanel() {
+    sourcesBody.classList.remove('open');
+    if (chevron) chevron.style.transform = 'rotate(0deg)';
+  }
+
+  sourcesToggle.addEventListener('click', () => {
+    const isNowOpen = sourcesBody.classList.toggle('open');
+    if (chevron) chevron.style.transform = isNowOpen ? 'rotate(180deg)' : 'rotate(0deg)';
+    localStorage.setItem('sources_panel_open', isNowOpen);
+  });
+
+  // Restore panel state — open by default on first visit
+  const panelState = localStorage.getItem('sources_panel_open');
+  if (panelState === 'true' || panelState === null) openSourcesPanel();
+
+  updateSourcePills();
+
+  // ── Currency toggle ───────────────────────────────────────────────────────
+
+  const toggle = document.getElementById('currency-toggle');
+  if (toggle) {
+    toggle.addEventListener('change', (e) => {
+      activeCurrency = e.target.checked ? 'SGD' : 'USD';
+      const usdLabel = document.getElementById('usd-label');
+      const sgdLabel = document.getElementById('sgd-label');
+      if (activeCurrency === 'SGD') {
+        if (usdLabel) { usdLabel.style.color = 'var(--text-secondary)'; usdLabel.style.fontWeight = '500'; }
+        if (sgdLabel) { sgdLabel.style.color = 'var(--accent-purple)'; sgdLabel.style.fontWeight = '600'; }
+      } else {
+        if (usdLabel) { usdLabel.style.color = 'var(--accent-cyan)'; usdLabel.style.fontWeight = '600'; }
+        if (sgdLabel) { sgdLabel.style.color = 'var(--text-secondary)'; sgdLabel.style.fontWeight = '500'; }
+      }
+      renderDashboard();
+    });
+  }
+
+  // ── Tab switching ─────────────────────────────────────────────────────────
+
+  function activateTab(tabId) {
+    ['tab-active', 'tab-realized', 'tab-history'].forEach(id => {
+      document.getElementById(id).classList.remove('active');
+    });
+    document.getElementById(tabId).classList.add('active');
+
+    const isHistory = tabId === 'tab-history';
+    document.getElementById('portfolio-content').classList.toggle('hidden', isHistory);
+    document.getElementById('history-content').classList.toggle('hidden', !isHistory);
+  }
+
+  document.getElementById('tab-active').addEventListener('click', () => {
+    currentTab = 'active';
+    activateTab('tab-active');
+    renderDashboard();
+  });
+
+  document.getElementById('tab-realized').addEventListener('click', () => {
+    currentTab = 'realized';
+    activateTab('tab-realized');
+    renderDashboard();
+  });
+
+  document.getElementById('tab-history').addEventListener('click', () => {
+    currentTab = 'history';
+    activateTab('tab-history');
+    renderHistoryTab();
+  });
+
+  // ── Load buttons ──────────────────────────────────────────────────────────
+
+  document.getElementById('load-btn').addEventListener('click', () => {
+    const url = document.getElementById('csv-url').value.trim();
+    if (url) { localStorage.setItem('saved_csv_url', url); updateSourcePills(); fetchRemoteCSV(url, 'active'); }
+    else alert("Please paste the Active Holdings CSV URL.");
+  });
+
+  document.getElementById('load-realized-btn').addEventListener('click', () => {
+    const url = document.getElementById('realized-url').value.trim();
+    if (url) { localStorage.setItem('saved_realized_url', url); updateSourcePills(); fetchRemoteCSV(url, 'realized'); }
+    else alert("Please paste the Realized History CSV URL.");
+  });
+
+  document.getElementById('load-snapshot-btn').addEventListener('click', () => {
+    const url = document.getElementById('snapshot-url').value.trim();
+    if (url) { localStorage.setItem('saved_snapshot_url', url); updateSourcePills(); fetchRemoteCSV(url, 'snapshot'); }
+    else alert("Please paste the Snapshots CSV URL.");
+  });
+
+  // ── Offline file upload ───────────────────────────────────────────────────
+
+  document.getElementById('csv-file').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    Papa.parse(file, {
+      header: true, skipEmptyLines: true,
+      complete: (results) => processData(results.data, currentTab),
+      error: (err) => alert('Error parsing file.\n' + err.message)
+    });
+    e.target.value = '';
+  });
+
+  // ── Clear all ────────────────────────────────────────────────────────────
+
+  document.getElementById('clear-btn').addEventListener('click', () => {
+    ['saved_csv_url', 'saved_realized_url', 'saved_snapshot_url'].forEach(k => localStorage.removeItem(k));
+    ['csv-url', 'realized-url', 'snapshot-url'].forEach(id => { document.getElementById(id).value = ''; });
+    globalSnapshotData = null;
+    selectedHistoryTickers.clear();
+    updateSourcePills();
+    alert('All links cleared. Resetting to demo data...');
+    processData(Papa.parse(DEFAULT_CSV_DATA,      { header: true, skipEmptyLines: true }).data, 'active');
+    processData(Papa.parse(DEFAULT_REALIZED_DATA, { header: true, skipEmptyLines: true }).data, 'realized');
+    if (currentTab === 'history') renderHistoryTab();
+  });
+
+  // ── Refresh prices button ─────────────────────────────────────────────────
+
+  const refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) refreshBtn.addEventListener('click', refreshPrices);
+
+  // ── Date range buttons ────────────────────────────────────────────────────
+
+  document.querySelectorAll('.range-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      e.currentTarget.classList.add('active');
+      activeHistoryRange = e.currentTarget.dataset.range;
+      if (currentTab === 'history') renderHistoryChart();
+    });
+  });
+
+  // ── Table column sorting ──────────────────────────────────────────────────
+
+  document.querySelectorAll('th.sortable').forEach(th => {
+    th.addEventListener('click', (e) => {
+      const column      = e.target.getAttribute('data-sort');
+      const tableId     = e.target.closest('table').id;
+      const isRealized  = tableId === 'table-realized';
+
+      if (currentSort.column === column && currentSort.table === tableId) {
+        currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+      } else {
+        currentSort.column    = column;
+        currentSort.direction = 'asc';
+        currentSort.table     = tableId;
+      }
+
+      document.querySelectorAll(`#${tableId} th.sortable`).forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
+      e.target.classList.add(currentSort.direction === 'asc' ? 'sort-asc' : 'sort-desc');
+
+      const dataTarget = isRealized ? globalRealizedData : globalActiveData;
+      dataTarget.sort((a, b) => {
+        let valA = a[column], valB = b[column];
+        if (column === 'date') { valA = new Date(valA).getTime() || 0; valB = new Date(valB).getTime() || 0; }
+        if (typeof valA === 'string' && typeof valB === 'string') {
+          valA = valA.toLowerCase(); valB = valB.toLowerCase();
+          if (valA < valB) return currentSort.direction === 'asc' ? -1 : 1;
+          if (valA > valB) return currentSort.direction === 'asc' ?  1 : -1;
+          return 0;
+        }
+        valA = valA || 0; valB = valB || 0;
+        return currentSort.direction === 'asc' ? valA - valB : valB - valA;
+      });
+
+      renderTables(dataTarget, isRealized);
+    });
+  });
+
+  // ── Initial data load ─────────────────────────────────────────────────────
+
+  const savedActive   = localStorage.getItem('saved_csv_url');
+  const savedRealized = localStorage.getItem('saved_realized_url');
+  const savedSnapshot = localStorage.getItem('saved_snapshot_url');
+
+  if (savedActive) {
+    document.getElementById('csv-url').value = savedActive;
+    fetchRemoteCSV(savedActive, 'active');
+  } else {
+    processData(Papa.parse(DEFAULT_CSV_DATA, { header: true, skipEmptyLines: true }).data, 'active', false);
+  }
+
+  if (savedRealized) {
+    document.getElementById('realized-url').value = savedRealized;
+    fetchRemoteCSV(savedRealized, 'realized');
+  } else {
+    processData(Papa.parse(DEFAULT_REALIZED_DATA, { header: true, skipEmptyLines: true }).data, 'realized', false);
+  }
+
+  if (savedSnapshot) {
+    document.getElementById('snapshot-url').value = savedSnapshot;
+    fetchRemoteCSV(savedSnapshot, 'snapshot');
+  }
+});
+
+// ── Remote CSV Fetch ──────────────────────────────────────────────────────────
+
+function fetchRemoteCSV(url, targetTab) {
+  const loader = document.getElementById('loading');
+  if (loader) {
+    loader.querySelector('p').textContent = `Fetching ${targetTab.toUpperCase()} data...`;
+    loader.classList.remove('hidden');
+  }
+  const liveUrl = url + (url.includes('?') ? '&' : '?') + 'nocache=' + Date.now();
+  Papa.parse(liveUrl, {
+    download: true, header: true, skipEmptyLines: true,
+    complete: (results) => {
+      if (results.data?.length > 0) {
+        if (targetTab === 'snapshot') handleSnapshotData(results.data);
+        else processData(results.data, targetTab);
+      } else {
+        if (loader) loader.classList.add('hidden');
+        alert(`The CSV for ${targetTab} returned no valid rows.`);
+      }
+    },
+    error: (error) => {
+      if (loader) loader.classList.add('hidden');
+      alert(`Error fetching ${targetTab} CSV.\n${error.message}`);
+    }
+  });
+}
+
+// ── Snapshot Data Handler ────────────────────────────────────────────────────
+
+function handleSnapshotData(rows) {
+  globalSnapshotData = processSnapshotData(rows);
+  selectedHistoryTickers.clear();
+  const loader = document.getElementById('loading');
+  if (loader) loader.classList.add('hidden');
+  if (currentTab === 'history') renderHistoryTab();
+}
+
+// Pivot flat CSV rows into { dates[], tickers[], series{} } for charting
+function processSnapshotData(rows) {
+  const dateMap   = {};
+  const tickerSet = new Set();
+
+  rows.forEach(row => {
+    const date           = (findValue(row, ['date']) || '').trim();
+    const ticker         = (findValue(row, ['ticker', 'symbol']) || '').trim().toUpperCase();
+    const totalUSD       = parseNum(findValue(row, ['total value']));
+    const portfolioTotal = parseNum(findValue(row, ['portfolio total']));
+
+    if (!date || !ticker) return;
+    tickerSet.add(ticker);
+    if (!dateMap[date]) dateMap[date] = {};
+    dateMap[date][ticker]      = totalUSD;
+    dateMap[date]['__TOTAL__'] = portfolioTotal;
+  });
+
+  const dates   = Object.keys(dateMap).sort();
+  const tickers = [...tickerSet].sort();
+
+  const series = { '__TOTAL__': dates.map(d => dateMap[d]['__TOTAL__'] || 0) };
+  tickers.forEach(t => { series[t] = dates.map(d => dateMap[d][t] || 0); });
+
+  return { dates, tickers, series };
+}
+
+// Slice snapshot data to the selected date range
+function filterByRange(data, range) {
+  if (range === 'All' || !data.dates.length) return data;
+  const now    = new Date();
+  const cutoff = new Date(now);
+  if (range === '1W') cutoff.setDate(now.getDate() - 7);
+  else if (range === '1M') cutoff.setMonth(now.getMonth() - 1);
+  else if (range === '3M') cutoff.setMonth(now.getMonth() - 3);
+
+  const cutoffStr = cutoff.toISOString().split('T')[0];
+  const indices   = data.dates.map((d, i) => d >= cutoffStr ? i : -1).filter(i => i >= 0);
+
+  return {
+    dates:   indices.map(i => data.dates[i]),
+    tickers: data.tickers,
+    series:  Object.fromEntries(
+      Object.entries(data.series).map(([k, v]) => [k, indices.map(i => v[i])])
+    )
+  };
+}
+
+// ── Active Portfolio Data Processing ─────────────────────────────────────────
+
+async function processData(data, targetTab, showLoader = true) {
+  const loader = document.getElementById('loading');
+  if (showLoader && loader) {
+    loader.querySelector('p').textContent = `Processing ${targetTab.toUpperCase()} data...`;
+    loader.classList.remove('hidden');
+  }
+
+  const processedData = [];
+
+  // ── ACTIVE PORTFOLIO ──────────────────────────────────────────────────────
+  if (targetTab === 'active') {
+    const allTickers = data.map(row => {
+      const rawTicker = findValue(row, ['ticker', 'symbol', 'name']) || 'UNKNOWN';
+      const currency  = (findValue(row, ['currency', 'base']) || 'USD').trim().toUpperCase();
+      return normalizeTicker(rawTicker, currency);
+    });
+
+    const pricesDict = await fetchLivePrices(allTickers);
+    updateLastRefreshed();
+
+    for (const row of data) {
+      const rawTicker   = findValue(row, ['ticker', 'symbol', 'name']) || 'UNKNOWN';
+      const rowCurrency = (findValue(row, ['currency', 'base']) || 'USD').trim().toUpperCase();
+      const cleanTicker = normalizeTicker(rawTicker, rowCurrency);
+
+      const shares     = parseNum(findValue(row, ['share', 'qty', 'quantity']));
+      let totalCostVal = parseNum(findValue(row, ['total cost price', 'total cost value', 'total cost', 'cost price', 'purchase']));
+
+      const dictData = pricesDict[cleanTicker];
+      let dataSource = dictData?.price ? 'Yahoo' : 'Google';
+      let mktPrice   = dictData?.price || 0;
+      let stockName  = dictData?.name  || nameOf(cleanTicker);
+
+      if (mktPrice === 0) {
+        mktPrice   = parseNum(findValue(row, ['market price', 'current price', 'live price', 'googlefinance']));
+        dataSource = 'Google';
+      }
+
+      if (rowCurrency === 'SGD' && currentSgdRate > 0) {
+        totalCostVal /= currentSgdRate;
+        mktPrice     /= currentSgdRate;
+      }
+
+      const costPrice  = shares > 0 ? totalCostVal / shares : 0;
+      const totalMktVal = shares * mktPrice;
+      const profit      = totalMktVal - totalCostVal;
+      const profitPct   = totalCostVal > 0 ? (profit / totalCostVal) * 100 : 0;
+
+      processedData.push({
+        ticker: rawTicker, stockName,
+        category: findValue(row, ['category', 'sector', 'type']) || 'Other',
+        shares, costPrice, mktPrice, totalMktVal, profit, profitPct,
+        source: dataSource, originalBase: rowCurrency
+      });
+    }
+
+    globalActiveData = processedData;
+    if (currentTab === 'active') renderDashboard();
+  }
+
+  // ── REALIZED HISTORY ──────────────────────────────────────────────────────
+  else if (targetTab === 'realized') {
+    for (const row of data) {
+      const rawTicker   = findValue(row, ['ticker', 'symbol', 'name']) || 'UNKNOWN';
+      const rowCurrency = (findValue(row, ['currency', 'base']) || 'USD').trim().toUpperCase();
+      const stockName   = nameOf(normalizeTicker(rawTicker, rowCurrency));
+
+      const category = findValue(row, ['category', 'sector', 'type']) || 'Other';
+      const shares   = parseNum(findValue(row, ['share', 'qty', 'quantity']));
+      const date     = findValue(row, ['date', 'closed', 'time']) || 'Historical';
+
+      let totalBuyCost   = parseNum(findValue(row, ['total buy cost', 'buy cost', 'cost']));
+      let totalSellPrice = parseNum(findValue(row, ['total sell price', 'sell price', 'proceeds', 'sell']));
+      const commission   = parseNum(findValue(row, ['commission', 'fee']));
+
+      let profit = parseNum(findValue(row, ['profit', 'realized profit', 'profits']));
+      if (profit === 0 && totalSellPrice > 0) profit = totalSellPrice - totalBuyCost - commission;
+
+      let profitPct = parseNum(findValue(row, ['% of profit', 'profit %', 'return', 'gain %', 'gain']));
+      if (profitPct === 0 && totalBuyCost > 0) profitPct = (profit / totalBuyCost) * 100;
+
+      if (rowCurrency === 'SGD' && currentSgdRate > 0) {
+        profit         /= currentSgdRate;
+        totalBuyCost   /= currentSgdRate;
+        totalSellPrice /= currentSgdRate;
+      }
+
+      processedData.push({
+        date, ticker: rawTicker, stockName, category, shares,
+        profit, profitPct,
+        totalCost: totalBuyCost, totalSell: totalSellPrice,
+        originalBase: rowCurrency
+      });
+    }
+
+    globalRealizedData = processedData;
+    if (currentTab === 'realized') renderDashboard();
+  }
+
+  if (loader) loader.classList.add('hidden');
+}
+
+// ── Dashboard Rendering ───────────────────────────────────────────────────────
+
+function renderDashboard() {
+  // When currency toggles on the history tab, just re-render the chart
+  if (currentTab === 'history') { renderHistoryChart(); return; }
+
+  const isRealized = currentTab === 'realized';
+  const data = isRealized ? globalRealizedData : globalActiveData;
+
+  let totalGross = 0, totalCost = 0, totalProfitAgg = 0;
+
+  data.forEach(item => {
+    if (isRealized) {
+      totalGross     += item.totalSell || 0;
+      totalCost      += item.totalCost || 0;
+      totalProfitAgg += item.profit    || 0;
+    } else {
+      totalGross     += item.totalMktVal || 0;
+      totalCost      += (item.totalMktVal - item.profit) || 0;
+      totalProfitAgg += item.profit || 0;
+    }
+  });
+
+  const overallReturn = totalCost > 0 ? (totalProfitAgg / totalCost) * 100 : 0;
+
+  const w1 = document.getElementById('widget-1');
+  const w2 = document.getElementById('widget-2');
+  if (w1) w1.style.display = isRealized ? 'none' : 'flex';
+  if (w2) w2.style.display = isRealized ? 'none' : 'flex';
+
+  document.getElementById('title-val').textContent  = isRealized ? 'Total Cash Recovered' : 'Total Market Value';
+  document.getElementById('title-cost').textContent = isRealized ? 'Total Capital Pledged' : 'Total Cost Value';
+  document.getElementById('title-prof').textContent = isRealized ? 'Total Realized Gain'   : 'Unrealized Profit';
+
+  document.getElementById('total-value').textContent = formatCurrency(totalGross);
+  document.getElementById('total-cost').textContent  = formatCurrency(totalCost);
+
+  const profitEl = document.getElementById('total-profit');
+  profitEl.textContent = formatCurrency(totalProfitAgg);
+  profitEl.className = `widget-value ${totalProfitAgg >= 0 ? 'profit-positive' : 'profit-negative'}`;
+
+  const badgeEl = document.getElementById('total-return-badge');
+  badgeEl.textContent = `${overallReturn >= 0 ? '+' : ''}${overallReturn.toFixed(2)}%`;
+  badgeEl.style.backgroundColor = overallReturn >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)';
+  badgeEl.style.color = overallReturn >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+
+  const indicator = document.getElementById('data-source-indicator');
+  if (indicator) {
+    if (isRealized) {
+      indicator.innerHTML = '● <span style="color:var(--accent-purple);">Offline Master Record</span>';
+    } else {
+      const usedYahoo  = data.some(i => i.source === 'Yahoo');
+      const usedGoogle = data.some(i => i.source === 'Google');
+      if      (usedYahoo && usedGoogle) indicator.innerHTML = '● Data Source: <span style="color:var(--accent-cyan);">Yahoo</span> & <span style="color:var(--accent-red);">Google</span>';
+      else if (usedYahoo)               indicator.innerHTML = '● Data Source: <span style="color:var(--accent-cyan);">Yahoo Finance API</span>';
+      else if (usedGoogle)              indicator.innerHTML = '● Data Source: <span style="color:var(--accent-red);">Google Sheets (Fallback)</span>';
+      else                              indicator.innerHTML = '● System Output';
+    }
+  }
+
+  renderTables(data, isRealized);
+  try { renderChart(data, isRealized); } catch (e) { console.error('Chart error', e); }
+}
+
+// ── Table Rendering ───────────────────────────────────────────────────────────
+
+function renderTables(data, isRealized) {
+  const tableActive   = document.getElementById('table-active');
+  const tableRealized = document.getElementById('table-realized');
+  const headTitle     = document.getElementById('table-head-title');
+
+  if (isRealized) {
+    tableActive.classList.add('hidden');
+    tableRealized.classList.remove('hidden');
+    tableRealized.style.display = 'table';
+    headTitle.textContent = 'Historical Closed Transactions';
+
+    const tbody = document.getElementById('realized-body');
+    tbody.innerHTML = '';
+    data.forEach(item => {
+      const pos   = item.profit >= 0;
+      const cls   = pos ? 'profit-positive' : 'profit-negative';
+      const sign  = pos ? '+' : '';
+      const sgdBadge = item.originalBase === 'SGD'
+        ? ' <span style="font-size:0.6rem;background:rgba(255,255,255,0.1);padding:2px 4px;border-radius:4px;color:#94a3b8;margin-left:4px;">SGD</span>'
+        : '';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="font-size:0.85rem;color:var(--text-secondary);">${item.date}</td>
+        <td class="ticker-cell"><div style="display:flex;flex-direction:column;">
+          <span style="font-weight:600;color:var(--text-primary);font-size:0.95rem;">${item.stockName}</span>
+          <span style="font-size:0.7rem;color:var(--text-secondary);opacity:0.8;">${item.ticker}${sgdBadge}</span>
+        </div></td>
+        <td><span class="category-badge">${item.category}</span></td>
+        <td class="${cls}">${sign}${formatCurrency(item.profit || 0)}</td>
+        <td class="${cls}">${sign}${(item.profitPct || 0).toFixed(2)}%</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } else {
+    tableRealized.classList.add('hidden');
+    tableActive.classList.remove('hidden');
+    tableActive.style.display = 'table';
+    headTitle.textContent = 'Live Holdings Breakdown';
+
+    const tbody = document.getElementById('holdings-body');
+    tbody.innerHTML = '';
+    data.forEach(item => {
+      const pos  = item.profit >= 0;
+      const cls  = pos ? 'profit-positive' : 'profit-negative';
+      const sign = pos ? '+' : '';
+      const sgdBadge = item.originalBase === 'SGD'
+        ? ' <span style="font-size:0.6rem;background:rgba(255,255,255,0.1);padding:2px 4px;border-radius:4px;color:#94a3b8;margin-left:4px;">SGD</span>'
+        : '';
+      const srcColor = item.source === 'Yahoo' ? 'var(--accent-cyan)' : 'var(--accent-red)';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="ticker-cell"><div style="display:flex;flex-direction:column;">
+          <span style="font-weight:600;color:var(--text-primary);font-size:0.95rem;">${item.stockName}</span>
+          <span style="font-size:0.7rem;color:var(--text-secondary);opacity:0.8;">${item.ticker}${sgdBadge}</span>
+        </div></td>
+        <td><span class="category-badge">${item.category}</span></td>
+        <td>${item.shares.toLocaleString()}</td>
+        <td>${formatCurrency(item.costPrice)}</td>
+        <td>${formatCurrency(item.mktPrice)} <span style="font-size:0.60rem;color:${srcColor};display:block;">${item.source}</span></td>
+        <td>${formatCurrency(item.totalMktVal)}</td>
+        <td class="${cls}">${sign}${formatCurrency(item.profit)}</td>
+        <td class="${cls}">${sign}${item.profitPct.toFixed(2)}%</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+}
+
+// ── Allocation Chart ──────────────────────────────────────────────────────────
+
+function renderChart(data, isRealized) {
+  if (typeof Chart === 'undefined') return;
+
+  const allocations = {};
+  data.forEach(item => {
+    if (!allocations[item.category]) allocations[item.category] = 0;
+    const rawVal = isRealized ? (item.totalSell || Math.abs(item.profit)) : item.totalMktVal;
+    allocations[item.category] += activeCurrency === 'SGD' ? rawVal * currentSgdRate : rawVal;
+  });
+
+  const labels = Object.keys(allocations);
+  const values = Object.values(allocations);
+
+  const canvas = document.getElementById('allocationChart');
+  if (!canvas) return;
+  if (allocationChartInstance) allocationChartInstance.destroy();
+
+  const palette = isRealized
+    ? ['#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#6366f1']
+    : ['#06b6d4', '#8b5cf6', '#10b981', '#3b82f6', '#f59e0b', '#ec4899'];
+
+  Chart.defaults.color = '#94a3b8';
+  Chart.defaults.font.family = "'Outfit', sans-serif";
+
+  allocationChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: palette.slice(0, Math.min(labels.length, palette.length)), borderWidth: 0, hoverOffset: 4 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '75%',
+      plugins: {
+        legend: { position: 'bottom', labels: { padding: 20, usePointStyle: true, pointStyle: 'circle' } },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.9)', titleColor: '#fff', bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
+          callbacks: {
+            label: (ctx) => ` ${ctx.label}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: activeCurrency, minimumFractionDigits: 2 }).format(ctx.raw)}`
+          }
+        }
+      }
+    }
+  });
+}
+
+// ── History Tab ───────────────────────────────────────────────────────────────
+
+function renderHistoryTab() {
+  const hasData = globalSnapshotData && globalSnapshotData.dates.length > 0;
+
+  document.getElementById('history-chart-section').classList.toggle('hidden', !hasData);
+  document.getElementById('history-empty').classList.toggle('hidden', hasData);
+
+  if (!hasData) return;
+
+  renderTickerFilter();
+  renderHistoryChart();
+}
+
+function renderTickerFilter() {
+  const container = document.getElementById('ticker-filter');
+  if (!container || !globalSnapshotData) return;
+  container.innerHTML = '';
+
+  // Total Portfolio chip — always active, not toggleable
+  const totalChip = document.createElement('button');
+  totalChip.className = 'ticker-chip active';
+  totalChip.textContent = 'Total Portfolio';
+  totalChip.style.cssText = `border-color:#06b6d4; color:#06b6d4; background:rgba(6,182,212,0.12);`;
+  totalChip.title = 'Total portfolio value is always shown';
+  container.appendChild(totalChip);
+
+  // Per-ticker chips
+  globalSnapshotData.tickers.forEach((ticker, idx) => {
+    const color  = CHART_COLORS[idx % CHART_COLORS.length];
+    const active = selectedHistoryTickers.has(ticker);
+
+    const chip = document.createElement('button');
+    chip.className = `ticker-chip${active ? ' active' : ''}`;
+    chip.textContent = ticker;
+    chip.style.cssText = active
+      ? `border-color:${color}; color:${color}; background:${color}1a;`
+      : '';
+
+    chip.addEventListener('click', () => {
+      if (selectedHistoryTickers.has(ticker)) {
+        selectedHistoryTickers.delete(ticker);
+        chip.classList.remove('active');
+        chip.style.cssText = '';
+      } else {
+        selectedHistoryTickers.add(ticker);
+        chip.classList.add('active');
+        chip.style.cssText = `border-color:${color}; color:${color}; background:${color}1a;`;
+      }
+      renderHistoryChart();
+    });
+
+    container.appendChild(chip);
+  });
+}
+
+function renderHistoryChart() {
+  if (typeof Chart === 'undefined' || !globalSnapshotData) return;
+
+  const filtered = filterByRange(globalSnapshotData, activeHistoryRange);
+  const canvas   = document.getElementById('historyChart');
+  if (!canvas) return;
+
+  if (historyChartInstance) historyChartInstance.destroy();
+
+  const datasets = [];
+
+  // Total portfolio — bold cyan line with subtle fill
+  datasets.push({
+    label: 'Total Portfolio',
+    data: filtered.series['__TOTAL__'] || [],
+    borderColor: '#06b6d4',
+    backgroundColor: 'rgba(6,182,212,0.06)',
+    borderWidth: 3,
+    pointRadius: 3,
+    pointHoverRadius: 6,
+    tension: 0.3,
+    fill: true,
+    order: 0
+  });
+
+  // Selected ticker lines
+  [...selectedHistoryTickers].forEach((ticker, idx) => {
+    if (!filtered.series[ticker]) return;
+    const allIdx = globalSnapshotData.tickers.indexOf(ticker);
+    const color  = CHART_COLORS[allIdx % CHART_COLORS.length];
+    datasets.push({
+      label: ticker,
+      data: filtered.series[ticker],
+      borderColor: color,
+      backgroundColor: 'transparent',
+      borderWidth: 2,
+      pointRadius: 2,
+      pointHoverRadius: 5,
+      tension: 0.3,
+      fill: false,
+      order: idx + 1
+    });
+  });
+
+  Chart.defaults.color = '#94a3b8';
+  Chart.defaults.font.family = "'Outfit', sans-serif";
+
+  historyChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'line',
+    data: { labels: filtered.dates, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'top',
+          labels: { usePointStyle: true, pointStyle: 'circle', padding: 20 }
+        },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.95)',
+          titleColor: '#fff',
+          bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)',
+          borderWidth: 1,
+          padding: 14,
+          callbacks: {
+            label: (ctx) => ` ${ctx.dataset.label}: ${formatCurrency(ctx.raw)}`
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(255,255,255,0.03)' },
+          ticks: { color: '#94a3b8', maxTicksLimit: 10, maxRotation: 0 }
+        },
+        y: {
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          ticks: { color: '#94a3b8', callback: (val) => formatAxisValue(val) }
+        }
+      }
+    }
+  });
+}

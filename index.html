@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Apex Portfolio Dashboard</title>
+  <meta name="description" content="View investment portfolio metrics, allocations, and performance.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <script src="https://unpkg.com/feather-icons"></script>
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- ── Header ─────────────────────────────────────────────────────────── -->
+    <header class="app-header">
+
+      <!-- Top row: logo + currency toggle -->
+      <div class="header-top">
+        <div class="logo">
+          <div class="logo-title">
+            <i data-feather="pie-chart" style="color: var(--accent-cyan);"></i>
+            <h1>Apex Portfolio</h1>
+          </div>
+          <div class="logo-meta">
+            <span id="data-source-indicator">● Live via Yahoo Finance API</span>
+            <span id="last-updated">–</span>
+            <button id="refresh-btn" class="refresh-btn">↻ Refresh</button>
+          </div>
+        </div>
+
+        <div class="currency-toggle-wrapper">
+          <span id="usd-label" class="currency-label active-currency">USD</span>
+          <label class="switch">
+            <input type="checkbox" id="currency-toggle">
+            <span class="slider round"></span>
+          </label>
+          <span id="sgd-label" class="currency-label">SGD</span>
+          <span id="exchange-rate-display" class="exchange-rate">Fetching...</span>
+        </div>
+      </div>
+
+      <!-- Collapsible data sources panel -->
+      <div class="sources-panel">
+        <button id="sources-toggle" class="sources-toggle-btn">
+          <div class="sources-toggle-left">
+            <i data-feather="database" class="sources-icon"></i>
+            <span>Data Sources</span>
+          </div>
+          <div class="sources-toggle-right">
+            <span class="source-pill" id="pill-active">Active</span>
+            <span class="source-pill" id="pill-realized">Realized</span>
+            <span class="source-pill" id="pill-snapshots">Snapshots</span>
+            <i data-feather="chevron-down" id="sources-chevron" class="sources-chevron"></i>
+          </div>
+        </button>
+
+        <div id="sources-body" class="sources-body">
+          <div class="sources-inputs">
+
+            <div class="source-row">
+              <i data-feather="activity" class="source-row-icon cyan"></i>
+              <input type="text" id="csv-url" placeholder="Google Sheet CSV — Active Holdings...">
+              <button id="load-btn" class="sync-btn cyan">Sync Active</button>
+            </div>
+
+            <div class="source-row">
+              <i data-feather="archive" class="source-row-icon purple"></i>
+              <input type="text" id="realized-url" placeholder="Google Sheet CSV — Realized History...">
+              <button id="load-realized-btn" class="sync-btn purple">Sync History</button>
+            </div>
+
+            <div class="source-row">
+              <i data-feather="trending-up" class="source-row-icon green"></i>
+              <input type="text" id="snapshot-url" placeholder="Google Sheet CSV — Snapshots (Daily History)...">
+              <button id="load-snapshot-btn" class="sync-btn green">Sync Snapshots</button>
+            </div>
+
+            <div class="sources-footer">
+              <button id="clear-btn" class="text-btn">Clear All Links</button>
+              <label for="csv-file" class="text-btn">Offline Upload</label>
+              <input type="file" id="csv-file" accept=".csv" style="display:none;">
+            </div>
+
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- ── Tab Navigation ─────────────────────────────────────────────────── -->
+    <div class="tab-navigation">
+      <button class="nav-tab active" id="tab-active">
+        <i data-feather="activity"></i> Active Portfolio
+      </button>
+      <button class="nav-tab" id="tab-realized">
+        <i data-feather="award"></i> Realized History
+      </button>
+      <button class="nav-tab" id="tab-history">
+        <i data-feather="bar-chart-2"></i> Portfolio History
+      </button>
+    </div>
+
+    <!-- ── Active & Realized Content ─────────────────────────────────────── -->
+    <div id="portfolio-content">
+      <main class="dashboard-grid">
+
+        <section class="summary-widgets">
+          <div class="widget card" id="widget-1">
+            <h3 class="widget-title" id="title-val">Total Market Value</h3>
+            <p class="widget-value" id="total-value">$0.00</p>
+            <span class="widget-badge" id="total-return-badge">+0.00%</span>
+          </div>
+          <div class="widget card" id="widget-2">
+            <h3 class="widget-title" id="title-cost">Total Cost Value</h3>
+            <p class="widget-value" id="total-cost">$0.00</p>
+            <i data-feather="dollar-sign" class="widget-icon"></i>
+          </div>
+          <div class="widget card" id="widget-3">
+            <h3 class="widget-title" id="title-prof">Unrealized Profit</h3>
+            <p class="widget-value profit-positive" id="total-profit">$0.00</p>
+            <i data-feather="trending-up" class="widget-icon"></i>
+          </div>
+        </section>
+
+        <div class="charts-and-table">
+          <section class="chart-container card">
+            <h2 class="section-title">Asset Allocation</h2>
+            <div class="canvas-wrapper">
+              <canvas id="allocationChart"></canvas>
+            </div>
+          </section>
+
+          <section class="table-container card">
+            <h2 class="section-title" id="table-head-title">Holdings Overview</h2>
+            <div class="table-responsive">
+
+              <table id="table-active">
+                <thead>
+                  <tr>
+                    <th data-sort="ticker" class="sortable">Ticker</th>
+                    <th data-sort="category" class="sortable">Category</th>
+                    <th data-sort="shares" class="sortable">Shares</th>
+                    <th data-sort="costPrice" class="sortable">Cost/Share</th>
+                    <th data-sort="mktPrice" class="sortable">Mkt Price</th>
+                    <th data-sort="totalMktVal" class="sortable">Total Mkt Val</th>
+                    <th data-sort="profit" class="sortable">Unrealized Profit</th>
+                    <th data-sort="profitPct" class="sortable">Profit %</th>
+                  </tr>
+                </thead>
+                <tbody id="holdings-body"></tbody>
+              </table>
+
+              <table id="table-realized" class="hidden" style="display:none;">
+                <thead>
+                  <tr>
+                    <th data-sort="date" class="sortable">Date</th>
+                    <th data-sort="ticker" class="sortable">Ticker</th>
+                    <th data-sort="category" class="sortable">Category</th>
+                    <th data-sort="profit" class="sortable">Realized Profit</th>
+                    <th data-sort="profitPct" class="sortable">Profit %</th>
+                  </tr>
+                </thead>
+                <tbody id="realized-body"></tbody>
+              </table>
+
+            </div>
+          </section>
+        </div>
+
+      </main>
+    </div>
+
+    <!-- ── Portfolio History Content ──────────────────────────────────────── -->
+    <div id="history-content" class="hidden">
+
+      <!-- Chart card (shown when data exists) -->
+      <section class="card history-card" id="history-chart-section">
+        <div class="history-header">
+          <h2 class="section-title" style="margin-bottom:0; border:none; padding:0;">Portfolio Performance</h2>
+          <div class="date-range-group">
+            <button class="range-btn active" data-range="1W">1W</button>
+            <button class="range-btn" data-range="1M">1M</button>
+            <button class="range-btn" data-range="3M">3M</button>
+            <button class="range-btn" data-range="All">All</button>
+          </div>
+        </div>
+        <div id="ticker-filter" class="ticker-filter"></div>
+        <div class="history-chart-wrapper">
+          <canvas id="historyChart"></canvas>
+        </div>
+      </section>
+
+      <!-- Empty state (shown when no snapshot data) -->
+      <div id="history-empty" class="card history-empty hidden">
+        <i data-feather="bar-chart-2" class="empty-icon"></i>
+        <p class="empty-title">No snapshot data yet.</p>
+        <p class="empty-sub">Open Data Sources above, paste your Snapshots CSV URL, and click Sync Snapshots.<br>The Apps Script trigger will begin populating data at 8am SGT each day.</p>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- Loading overlay -->
+  <div id="loading" class="hidden">
+    <div class="spinner"></div>
+    <p>Parsing CSV Data...</p>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
