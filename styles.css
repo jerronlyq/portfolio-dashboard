@@ -596,11 +596,178 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 @keyframes spin { 100% { transform: rotate(360deg); } }
 
 /* ── Responsive ───────────────────────────────────────────────────────────── */
+
+/* Desktop date cell style (used in realized table) */
+.mobile-date {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
 @media (max-width: 768px) {
-  .app-container { padding: 1rem; }
-  .header-top    { flex-direction: column; align-items: flex-start; }
-  .nav-tab       { padding: 0.65rem 0.85rem; font-size: 0.82rem; }
-  .source-row    { flex-wrap: wrap; }
-  .source-row input[type="text"] { min-width: 0; }
-  .history-header { flex-direction: column; align-items: flex-start; }
+
+  /* ── Layout ────────────────────────────────────────────────────── */
+  .app-container { padding: 1rem 0.9rem; }
+
+  /* ── Header ────────────────────────────────────────────────────── */
+  .header-top { flex-direction: column; align-items: flex-start; gap: 0.6rem; }
+  .currency-toggle-wrapper { align-self: flex-start; }
+  .logo-meta { gap: 0.55rem; }
+  /* Hide exchange rate on very small screens to save space */
+  .exchange-rate { display: none; }
+
+  /* ── Sources panel ─────────────────────────────────────────────── */
+  /* Hide status pills in toggle bar — too cramped */
+  .sources-toggle-right .source-pill { display: none; }
+  .sources-body.open { max-height: 520px; }
+
+  .source-row {
+    display: grid;
+    grid-template-columns: 20px 1fr;
+    grid-template-rows: auto auto;
+    gap: 0.4rem 0.6rem;
+    align-items: center;
+  }
+  .source-row-icon { grid-row: 1; grid-column: 1; }
+  .source-row input[type="text"] { grid-row: 1; grid-column: 2; width: 100%; }
+  .sync-btn { grid-row: 2; grid-column: 2; justify-self: start; }
+
+  .sources-footer { flex-wrap: wrap; gap: 0.75rem; }
+
+  /* ── Tab navigation ────────────────────────────────────────────── */
+  .tab-navigation {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    gap: 0;
+  }
+  .tab-navigation::-webkit-scrollbar { display: none; }
+  .nav-tab {
+    padding: 0.65rem 1rem;
+    font-size: 0.82rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ── Summary widgets ───────────────────────────────────────────── */
+  .widget-value { font-size: 1.75rem; }
+  .summary-widgets { grid-template-columns: 1fr; }
+
+  /* ── History tab ───────────────────────────────────────────────── */
+  .history-header { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+  .history-chart-wrapper { height: 280px; }
+  .ticker-filter { gap: 0.4rem; }
+  .ticker-chip { font-size: 0.72rem; padding: 0.25rem 0.7rem; }
+
+  /* ── Card hover: disable lift on mobile (touch devices) ─────────── */
+  .card:hover         { transform: none; box-shadow: none; }
+  .table-container.card:hover { transform: none; }
+
+  /* ════════════════════════════════════════════════════════════════
+     ACTIVE HOLDINGS TABLE → CARD LAYOUT
+     Each <tr> becomes a self-contained card.
+     The ticker cell acts as the card header.
+     All other cells render as label : value rows.
+  ════════════════════════════════════════════════════════════════ */
+  #table-active thead { display: none; }
+
+  #table-active tbody tr {
+    display: block;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    margin-bottom: 0.75rem;
+    padding: 0.9rem 1rem 0.6rem;
+  }
+  #table-active tbody tr:hover {
+    background: rgba(255, 255, 255, 0.04);
+    transform: none;
+  }
+
+  /* Ticker = card header row */
+  #table-active td.ticker-cell {
+    display: block;
+    padding: 0 0 0.75rem 0;
+    border-bottom: 1px solid var(--card-border);
+    margin-bottom: 0.55rem;
+  }
+
+  /* All data cells: label left, value right */
+  #table-active td:not(.ticker-cell) {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.28rem 0;
+    border-bottom: none;
+    font-size: 0.875rem;
+  }
+  #table-active td:not(.ticker-cell)::before {
+    content: attr(data-label);
+    font-size: 0.68rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    flex-shrink: 0;
+    margin-right: 0.75rem;
+  }
+
+  /* ════════════════════════════════════════════════════════════════
+     REALIZED HISTORY TABLE → CARD LAYOUT
+     Date sits above the ticker as a small timestamp label.
+     Ticker cell is the card title.
+     Category / P&L / Return render as label : value rows.
+  ════════════════════════════════════════════════════════════════ */
+  #table-realized thead { display: none; }
+
+  #table-realized tbody tr {
+    display: block;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    margin-bottom: 0.75rem;
+    padding: 0.9rem 1rem 0.6rem;
+  }
+  #table-realized tbody tr:hover {
+    background: rgba(255, 255, 255, 0.04);
+    transform: none;
+  }
+
+  /* Date cell: small uppercase timestamp above the stock name */
+  #table-realized .mobile-date {
+    display: block;
+    font-size: 0.68rem !important;
+    color: var(--text-secondary) !important;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 0 0 0.2rem 0;
+    border-bottom: none;
+  }
+
+  /* Ticker = card header */
+  #table-realized td.ticker-cell {
+    display: block;
+    padding: 0 0 0.75rem 0;
+    border-bottom: 1px solid var(--card-border);
+    margin-bottom: 0.55rem;
+  }
+
+  /* Category, P&L, Return: label : value */
+  #table-realized td:not(.ticker-cell):not(.mobile-date) {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.28rem 0;
+    border-bottom: none;
+    font-size: 0.875rem;
+  }
+  #table-realized td:not(.ticker-cell):not(.mobile-date)::before {
+    content: attr(data-label);
+    font-size: 0.68rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    flex-shrink: 0;
+    margin-right: 0.75rem;
+  }
 }

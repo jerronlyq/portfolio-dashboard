@@ -744,14 +744,14 @@ function renderTables(data, isRealized) {
         : '';
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td style="font-size:0.85rem;color:var(--text-secondary);">${item.date}</td>
+        <td class="mobile-date">${item.date}</td>
         <td class="ticker-cell"><div style="display:flex;flex-direction:column;">
           <span style="font-weight:600;color:var(--text-primary);font-size:0.95rem;">${item.stockName}</span>
           <span style="font-size:0.7rem;color:var(--text-secondary);opacity:0.8;">${item.ticker}${sgdBadge}</span>
         </div></td>
-        <td><span class="category-badge">${item.category}</span></td>
-        <td class="${cls}">${sign}${formatCurrency(item.profit || 0)}</td>
-        <td class="${cls}">${sign}${(item.profitPct || 0).toFixed(2)}%</td>
+        <td data-label="Category"><span class="category-badge">${item.category}</span></td>
+        <td data-label="P&amp;L" class="${cls}">${sign}${formatCurrency(item.profit || 0)}</td>
+        <td data-label="Return" class="${cls}">${sign}${(item.profitPct || 0).toFixed(2)}%</td>
       `;
       tbody.appendChild(tr);
     });
@@ -777,13 +777,13 @@ function renderTables(data, isRealized) {
           <span style="font-weight:600;color:var(--text-primary);font-size:0.95rem;">${item.stockName}</span>
           <span style="font-size:0.7rem;color:var(--text-secondary);opacity:0.8;">${item.ticker}${sgdBadge}</span>
         </div></td>
-        <td><span class="category-badge">${item.category}</span></td>
-        <td>${item.shares.toLocaleString()}</td>
-        <td>${formatCurrency(item.costPrice)}</td>
-        <td>${formatCurrency(item.mktPrice)} <span style="font-size:0.60rem;color:${srcColor};display:block;">${item.source}</span></td>
-        <td>${formatCurrency(item.totalMktVal)}</td>
-        <td class="${cls}">${sign}${formatCurrency(item.profit)}</td>
-        <td class="${cls}">${sign}${item.profitPct.toFixed(2)}%</td>
+        <td data-label="Category"><span class="category-badge">${item.category}</span></td>
+        <td data-label="Shares">${item.shares.toLocaleString()}</td>
+        <td data-label="Cost / Share">${formatCurrency(item.costPrice)}</td>
+        <td data-label="Mkt Price">${formatCurrency(item.mktPrice)} <span style="font-size:0.60rem;color:${srcColor};display:block;">${item.source}</span></td>
+        <td data-label="Market Value">${formatCurrency(item.totalMktVal)}</td>
+        <td data-label="P&amp;L" class="${cls}">${sign}${formatCurrency(item.profit)}</td>
+        <td data-label="Return" class="${cls}">${sign}${item.profitPct.toFixed(2)}%</td>
       `;
       tbody.appendChild(tr);
     });
