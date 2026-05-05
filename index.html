@@ -55,6 +55,7 @@
             <span class="source-pill" id="pill-active">Active</span>
             <span class="source-pill" id="pill-realized">Realized</span>
             <span class="source-pill" id="pill-snapshots">Snapshots</span>
+            <span class="source-pill" id="pill-finnhub">Finnhub</span>
             <i data-feather="chevron-down" id="sources-chevron" class="sources-chevron"></i>
           </div>
         </button>
@@ -78,6 +79,12 @@
               <i data-feather="trending-up" class="source-row-icon green"></i>
               <input type="text" id="snapshot-url" placeholder="Google Sheet CSV — Snapshots (Daily History)...">
               <button id="load-snapshot-btn" class="sync-btn green">Sync Snapshots</button>
+            </div>
+
+            <div class="source-row">
+              <i data-feather="key" class="source-row-icon orange"></i>
+              <input type="password" id="finnhub-key" placeholder="Finnhub API Key — free at finnhub.io (enables live prices, no proxy needed)">
+              <button id="save-finnhub-btn" class="sync-btn orange">Save Key</button>
             </div>
 
             <div class="sources-footer">

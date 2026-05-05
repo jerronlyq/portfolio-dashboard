@@ -52,6 +52,13 @@ const normalizeTicker = (raw, currency = 'USD') => {
   return t;
 };
 
+const FINNHUB_CRYPTO_MAP = {
+  'BTC-USD': 'BINANCE:BTCUSDT',
+  'ETH-USD': 'BINANCE:ETHUSDT',
+  'SOL-USD': 'BINANCE:SOLUSDT',
+};
+const toFinnhubSymbol = (ticker) => FINNHUB_CRYPTO_MAP[ticker] || ticker;
+
 const formatCurrency = (value) => {
   let displayVal = value;
   let currencyCode = 'USD';
@@ -87,6 +94,7 @@ function updateSourcePills() {
     { id: 'pill-active',    key: 'saved_csv_url',      cls: 'pill-cyan'   },
     { id: 'pill-realized',  key: 'saved_realized_url', cls: 'pill-purple' },
     { id: 'pill-snapshots', key: 'saved_snapshot_url', cls: 'pill-green'  },
+    { id: 'pill-finnhub',   key: 'finnhub_api_key',    cls: 'pill-orange' },
   ].forEach(({ id, key, cls }) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -175,35 +183,93 @@ async function fetchLivePrices(tickers) {
   )];
   if (cleanTickers.length === 0) return dictionary;
 
-  const joined = cleanTickers.join(',');
+  const finnhubKey = localStorage.getItem('finnhub_api_key') || '';
 
-  try {
-    const sparkUrl = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${joined}&range=1d&interval=1d`;
-    const res = await fetchWithProxy(sparkUrl);
-    if (res) {
-      const data = await res.json();
-      if (data) {
-        Object.keys(data).forEach(symbol => {
-          const params = data[symbol];
-          if (params?.close?.length > 0) {
-            dictionary[symbol.toUpperCase()] = {
-              price: params.close[params.close.length - 1],
-              name: nameOf(symbol.toUpperCase())
-            };
+  // ── 1. Finnhub — direct CORS, no proxy needed (US stocks, ETFs, crypto) ────
+  if (finnhubKey) {
+    const finnhubTickers = cleanTickers.filter(t => !t.endsWith('.SI'));
+    await Promise.all(finnhubTickers.map(async (ticker) => {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch(
+          `https://finnhub.io/api/v1/quote?symbol=${toFinnhubSymbol(ticker)}&token=${finnhubKey}`,
+          { signal: controller.signal }
+        );
+        clearTimeout(timer);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.c > 0) {
+            dictionary[ticker] = { price: data.c, name: nameOf(ticker), source: 'Finnhub' };
+            console.log(`[Finnhub] ${ticker}: ${data.c}`);
+          }
+        }
+      } catch (e) {
+        console.warn(`[Finnhub] failed for ${ticker}:`, e);
+      }
+    }));
+  }
+
+  // ── 2. Yahoo Spark v8 — for SGX (.SI) tickers and any Finnhub misses ──────
+  const afterFinnhub = cleanTickers.filter(t => !dictionary[t]?.price);
+  if (afterFinnhub.length > 0) {
+    try {
+      const sparkUrl = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${afterFinnhub.join(',')}&range=1d&interval=1d`;
+      const res = await fetchWithProxy(sparkUrl);
+      if (res) {
+        const data = await res.json();
+        (data?.spark?.result || []).forEach(item => {
+          const symbol   = item?.symbol?.toUpperCase();
+          if (!symbol) return;
+          const response = item?.response?.[0];
+          const closes   = (response?.indicators?.quote?.[0]?.close || []).filter(p => p != null);
+          const price    = closes[closes.length - 1] ?? response?.meta?.regularMarketPrice;
+          if (price) {
+            dictionary[symbol] = { price, name: nameOf(symbol), source: 'Yahoo' };
+            console.log(`[Spark v8] ${symbol}: ${price}`);
           }
         });
       }
+    } catch (e) {
+      console.warn('[Spark v8] batch fetch failed:', e);
     }
-  } catch (e) {
-    console.warn('Spark price fetch failed.', e);
   }
 
+  // ── 3. Yahoo v7 Quote — final fallback ────────────────────────────────────
+  const afterSpark = cleanTickers.filter(t => !dictionary[t]?.price);
+  if (afterSpark.length > 0) {
+    try {
+      const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${afterSpark.join(',')}`;
+      const res = await fetchWithProxy(quoteUrl);
+      if (res) {
+        const data = await res.json();
+        (data?.quoteResponse?.result || []).forEach(item => {
+          const symbol = item?.symbol?.toUpperCase();
+          const price  = item?.regularMarketPrice;
+          if (symbol && price) {
+            dictionary[symbol] = {
+              price,
+              name: item.shortName || item.longName || nameOf(symbol),
+              source: 'Yahoo'
+            };
+            console.log(`[v7 Quote] ${symbol}: ${price}`);
+          }
+        });
+      }
+    } catch (e) {
+      console.warn('[v7 Quote] fallback failed:', e);
+    }
+  }
+
+  // ── 4. Static names; live name lookup only for priced tickers ─────────────
   await Promise.all(cleanTickers.map(async (ticker) => {
     if (TICKER_NAME_MAP[ticker]) {
       if (dictionary[ticker]) dictionary[ticker].name = TICKER_NAME_MAP[ticker];
       else dictionary[ticker] = { price: 0, name: TICKER_NAME_MAP[ticker] };
       return;
     }
+    if (!dictionary[ticker]?.price) return;
+    if (dictionary[ticker].name && dictionary[ticker].name !== ticker) return;
     try {
       const searchUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${ticker}`;
       const res = await fetchWithProxy(searchUrl);
@@ -217,10 +283,11 @@ async function fetchLivePrices(tickers) {
         }
       }
     } catch (e) {
-      console.warn('Name lookup failed for', ticker);
+      console.warn(`[Name lookup] failed for ${ticker}:`, e);
     }
   }));
 
+  console.log('[fetchLivePrices] result:', dictionary);
   return dictionary;
 }
 
@@ -250,7 +317,7 @@ async function refreshPrices() {
     const profit       = totalMktVal - totalCostVal;
     const profitPct    = totalCostVal > 0 ? (profit / totalCostVal) * 100 : 0;
 
-    return { ...item, mktPrice, totalMktVal, profit, profitPct, source: 'Yahoo' };
+    return { ...item, mktPrice, totalMktVal, profit, profitPct, source: dictData.source || 'Yahoo' };
   });
 
   updateLastRefreshed();
@@ -374,11 +441,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     e.target.value = '';
   });
 
+  // ── Finnhub API key ───────────────────────────────────────────────────────
+
+  const finnhubKeyInput = document.getElementById('finnhub-key');
+  const saveFinnhubBtn  = document.getElementById('save-finnhub-btn');
+
+  if (finnhubKeyInput && localStorage.getItem('finnhub_api_key')) {
+    finnhubKeyInput.value = localStorage.getItem('finnhub_api_key');
+  }
+
+  saveFinnhubBtn?.addEventListener('click', () => {
+    const key = finnhubKeyInput?.value?.trim();
+    if (key) {
+      localStorage.setItem('finnhub_api_key', key);
+      updateSourcePills();
+      saveFinnhubBtn.textContent = '✓ Saved';
+      setTimeout(() => { saveFinnhubBtn.textContent = 'Save Key'; }, 1500);
+    } else {
+      localStorage.removeItem('finnhub_api_key');
+      updateSourcePills();
+    }
+  });
+
   // ── Clear all ────────────────────────────────────────────────────────────
 
   document.getElementById('clear-btn').addEventListener('click', () => {
-    ['saved_csv_url', 'saved_realized_url', 'saved_snapshot_url'].forEach(k => localStorage.removeItem(k));
+    ['saved_csv_url', 'saved_realized_url', 'saved_snapshot_url', 'finnhub_api_key'].forEach(k => localStorage.removeItem(k));
     ['csv-url', 'realized-url', 'snapshot-url'].forEach(id => { document.getElementById(id).value = ''; });
+    if (finnhubKeyInput) finnhubKeyInput.value = '';
     globalSnapshotData = null;
     selectedHistoryTickers.clear();
     updateSourcePills();
@@ -583,7 +673,7 @@ async function processData(data, targetTab, showLoader = true) {
       let totalCostVal = parseNum(findValue(row, ['total cost price', 'total cost value', 'total cost', 'cost price', 'purchase']));
 
       const dictData = pricesDict[cleanTicker];
-      let dataSource = dictData?.price ? 'Yahoo' : 'Google';
+      let dataSource = dictData?.source || (dictData?.price ? 'Yahoo' : 'Google');
       let mktPrice   = dictData?.price || 0;
       let stockName  = dictData?.name  || nameOf(cleanTicker);
 
@@ -707,12 +797,16 @@ function renderDashboard() {
     if (isRealized) {
       indicator.innerHTML = '● <span style="color:var(--accent-purple);">Offline Master Record</span>';
     } else {
-      const usedYahoo  = data.some(i => i.source === 'Yahoo');
-      const usedGoogle = data.some(i => i.source === 'Google');
-      if      (usedYahoo && usedGoogle) indicator.innerHTML = '● Data Source: <span style="color:var(--accent-cyan);">Yahoo</span> & <span style="color:var(--accent-red);">Google</span>';
-      else if (usedYahoo)               indicator.innerHTML = '● Data Source: <span style="color:var(--accent-cyan);">Yahoo Finance API</span>';
-      else if (usedGoogle)              indicator.innerHTML = '● Data Source: <span style="color:var(--accent-red);">Google Sheets (Fallback)</span>';
-      else                              indicator.innerHTML = '● System Output';
+      const usedFinnhub = data.some(i => i.source === 'Finnhub');
+      const usedYahoo   = data.some(i => i.source === 'Yahoo');
+      const usedGoogle  = data.some(i => i.source === 'Google');
+      const parts = [];
+      if (usedFinnhub) parts.push(`<span style="color:var(--accent-orange);">Finnhub</span>`);
+      if (usedYahoo)   parts.push(`<span style="color:var(--accent-cyan);">Yahoo Finance</span>`);
+      if (usedGoogle)  parts.push(`<span style="color:var(--accent-red);">Google (Fallback)</span>`);
+      indicator.innerHTML = parts.length
+        ? `● Data Source: ${parts.join(' & ')}`
+        : '● System Output';
     }
   }
 
@@ -770,7 +864,7 @@ function renderTables(data, isRealized) {
       const sgdBadge = item.originalBase === 'SGD'
         ? ' <span style="font-size:0.6rem;background:rgba(255,255,255,0.1);padding:2px 4px;border-radius:4px;color:#94a3b8;margin-left:4px;">SGD</span>'
         : '';
-      const srcColor = item.source === 'Yahoo' ? 'var(--accent-cyan)' : 'var(--accent-red)';
+      const srcColor = item.source === 'Finnhub' ? 'var(--accent-orange)' : item.source === 'Yahoo' ? 'var(--accent-cyan)' : 'var(--accent-red)';
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td class="ticker-cell"><div style="display:flex;flex-direction:column;">
