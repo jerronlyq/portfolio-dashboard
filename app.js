@@ -951,41 +951,33 @@ function renderTickerFilter() {
   if (!container || !globalSnapshotData) return;
   container.innerHTML = '';
 
-  // Total Portfolio chip — always active, not toggleable
-  const totalChip = document.createElement('button');
-  totalChip.className = 'ticker-chip active';
-  totalChip.textContent = 'Total Portfolio';
-  totalChip.style.cssText = `border-color:#06b6d4; color:#06b6d4; background:rgba(6,182,212,0.12);`;
-  totalChip.title = 'Total portfolio value is always shown';
-  container.appendChild(totalChip);
+  const select = document.createElement('select');
+  select.id        = 'ticker-select';
+  select.className = 'ticker-select';
 
-  // Per-ticker chips
-  globalSnapshotData.tickers.forEach((ticker, idx) => {
-    const color  = CHART_COLORS[idx % CHART_COLORS.length];
-    const active = selectedHistoryTickers.has(ticker);
+  const totalOpt = document.createElement('option');
+  totalOpt.value       = '__TOTAL__';
+  totalOpt.textContent = 'Total Portfolio';
+  select.appendChild(totalOpt);
 
-    const chip = document.createElement('button');
-    chip.className = `ticker-chip${active ? ' active' : ''}`;
-    chip.textContent = ticker;
-    chip.style.cssText = active
-      ? `border-color:${color}; color:${color}; background:${color}1a;`
-      : '';
-
-    chip.addEventListener('click', () => {
-      if (selectedHistoryTickers.has(ticker)) {
-        selectedHistoryTickers.delete(ticker);
-        chip.classList.remove('active');
-        chip.style.cssText = '';
-      } else {
-        selectedHistoryTickers.add(ticker);
-        chip.classList.add('active');
-        chip.style.cssText = `border-color:${color}; color:${color}; background:${color}1a;`;
-      }
-      renderHistoryChart();
-    });
-
-    container.appendChild(chip);
+  globalSnapshotData.tickers.forEach(ticker => {
+    const opt = document.createElement('option');
+    opt.value       = ticker;
+    opt.textContent = ticker;
+    select.appendChild(opt);
   });
+
+  // Restore previous single selection
+  const prev = [...selectedHistoryTickers][0];
+  if (prev) select.value = prev;
+
+  select.addEventListener('change', () => {
+    selectedHistoryTickers.clear();
+    if (select.value !== '__TOTAL__') selectedHistoryTickers.add(select.value);
+    renderHistoryChart();
+  });
+
+  container.appendChild(select);
 }
 
 function renderHistoryChart() {
@@ -997,39 +989,20 @@ function renderHistoryChart() {
 
   if (historyChartInstance) historyChartInstance.destroy();
 
-  const datasets = [];
+  // Single-select: show only the chosen ticker (or total portfolio)
+  const selectedTicker = [...selectedHistoryTickers][0] || null;
+  const seriesKey  = selectedTicker || '__TOTAL__';
+  const seriesData = filtered.series[seriesKey] || [];
+  const label      = selectedTicker || 'Total Portfolio';
+  const color      = selectedTicker
+    ? CHART_COLORS[globalSnapshotData.tickers.indexOf(selectedTicker) % CHART_COLORS.length]
+    : '#06b6d4';
 
-  // Total portfolio — bold cyan line with subtle fill
-  datasets.push({
-    label: 'Total Portfolio',
-    data: filtered.series['__TOTAL__'] || [],
-    borderColor: '#06b6d4',
-    backgroundColor: 'rgba(6,182,212,0.06)',
-    borderWidth: 3,
-    pointRadius: 3,
-    pointHoverRadius: 6,
-    tension: 0.3,
-    fill: true,
-    order: 0
-  });
-
-  // Selected ticker lines
-  [...selectedHistoryTickers].forEach((ticker, idx) => {
-    if (!filtered.series[ticker]) return;
-    const allIdx = globalSnapshotData.tickers.indexOf(ticker);
-    const color  = CHART_COLORS[allIdx % CHART_COLORS.length];
-    datasets.push({
-      label: ticker,
-      data: filtered.series[ticker],
-      borderColor: color,
-      backgroundColor: 'transparent',
-      borderWidth: 2,
-      pointRadius: 2,
-      pointHoverRadius: 5,
-      tension: 0.3,
-      fill: false,
-      order: idx + 1
-    });
+  // Day-over-day % change (null for first data point)
+  const pctChanges = seriesData.map((v, i) => {
+    if (i === 0) return null;
+    const prev = seriesData[i - 1];
+    return prev > 0 ? ((v - prev) / prev) * 100 : null;
   });
 
   Chart.defaults.color = '#94a3b8';
@@ -1037,7 +1010,20 @@ function renderHistoryChart() {
 
   historyChartInstance = new Chart(canvas.getContext('2d'), {
     type: 'line',
-    data: { labels: filtered.dates, datasets },
+    data: {
+      labels: filtered.dates,
+      datasets: [{
+        label,
+        data: seriesData,
+        borderColor: color,
+        backgroundColor: selectedTicker ? 'transparent' : `${color}0f`,
+        borderWidth: selectedTicker ? 2 : 3,
+        pointRadius: 3,
+        pointHoverRadius: 6,
+        tension: 0.3,
+        fill: !selectedTicker
+      }]
+    },
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -1055,7 +1041,15 @@ function renderHistoryChart() {
           borderWidth: 1,
           padding: 14,
           callbacks: {
-            label: (ctx) => ` ${ctx.dataset.label}: ${formatCurrency(ctx.raw)}`
+            label: (ctx) => {
+              const pct = pctChanges[ctx.dataIndex];
+              const lines = [` ${ctx.dataset.label}: ${formatCurrency(ctx.raw)}`];
+              if (pct !== null) {
+                const arrow = pct >= 0 ? '▲' : '▼';
+                lines.push(` ${arrow} ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% vs prev day`);
+              }
+              return lines;
+            }
           }
         }
       },
@@ -1071,4 +1065,40 @@ function renderHistoryChart() {
       }
     }
   });
+
+  renderHistoryMetrics(seriesData, pctChanges, color);
+}
+
+function renderHistoryMetrics(seriesData, pctChanges, color) {
+  const container = document.getElementById('history-metrics');
+  if (!container) return;
+
+  const n = seriesData.length;
+  if (n < 2) { container.innerHTML = ''; return; }
+
+  const firstVal  = seriesData.find(v => v > 0) || seriesData[0];
+  const lastVal   = seriesData[n - 1];
+  const periodPct = firstVal > 0 ? ((lastVal - firstVal) / firstVal) * 100 : null;
+  const lastPct   = pctChanges[n - 1];
+
+  const fmtPct = (pct) => {
+    if (pct === null || isNaN(pct)) return '–';
+    return `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+  };
+  const cls = (pct) => (pct === null || isNaN(pct)) ? '' : pct >= 0 ? 'metric-positive' : 'metric-negative';
+
+  container.innerHTML = `
+    <div class="history-metric-item">
+      <span class="history-metric-label">Period Return</span>
+      <span class="history-metric-value ${cls(periodPct)}">${fmtPct(periodPct)}</span>
+    </div>
+    <div class="history-metric-item">
+      <span class="history-metric-label">Last Day Change</span>
+      <span class="history-metric-value ${cls(lastPct)}">${fmtPct(lastPct)}</span>
+    </div>
+    <div class="history-metric-item">
+      <span class="history-metric-label">Current Value</span>
+      <span class="history-metric-value" style="color:${color}">${formatCurrency(lastVal)}</span>
+    </div>
+  `;
 }

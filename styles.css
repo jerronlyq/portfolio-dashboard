@@ -526,7 +526,7 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 .range-btn:hover  { transform: none; box-shadow: none; color: var(--text-primary); background: rgba(255,255,255,0.05) !important; }
 .range-btn.active { background: rgba(16,185,129,0.15) !important; color: var(--accent-green); font-weight: 600; }
 
-/* Ticker filter chips */
+/* Ticker dropdown filter */
 .ticker-filter {
   display: flex;
   flex-wrap: wrap;
@@ -536,20 +536,58 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   border-bottom: 1px solid var(--card-border);
 }
 
-.ticker-chip {
-  padding: 0.3rem 0.85rem;
-  border-radius: 20px;
-  font-size: 0.78rem;
-  font-weight: 500;
+.ticker-select {
+  appearance: none;
+  -webkit-appearance: none;
   font-family: var(--font-main);
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  background-color: rgba(255, 255, 255, 0.04);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.65rem center;
+  background-size: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 0.45rem 2.2rem 0.45rem 0.85rem;
   cursor: pointer;
-  border: 1px solid rgba(255,255,255,0.1);
-  background: rgba(255,255,255,0.03);
-  color: var(--text-secondary);
-  transition: border-color 0.2s, color 0.2s, background 0.2s;
-  letter-spacing: 0.01em;
+  transition: var(--transition);
+  min-width: 200px;
 }
-.ticker-chip:hover { transform: none; box-shadow: none; border-color: rgba(255,255,255,0.25); color: var(--text-primary); background: rgba(255,255,255,0.06) !important; }
+.ticker-select:hover, .ticker-select:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.22);
+  background-color: rgba(255, 255, 255, 0.07);
+}
+.ticker-select option { background: #1e293b; color: var(--text-primary); }
+
+/* History metrics strip */
+.history-metrics {
+  display: flex;
+  gap: 2rem;
+  padding: 0.85rem 0 1.25rem;
+  border-bottom: 1px solid var(--card-border);
+  flex-wrap: wrap;
+}
+.history-metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.history-metric-label {
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.history-metric-value {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.metric-positive { color: var(--accent-green) !important; }
+.metric-negative { color: var(--accent-red)   !important; }
 
 /* History line chart */
 .history-chart-wrapper {
@@ -660,8 +698,9 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   /* ── History tab ───────────────────────────────────────────────── */
   .history-header { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
   .history-chart-wrapper { height: 280px; }
-  .ticker-filter { gap: 0.4rem; }
-  .ticker-chip { font-size: 0.72rem; padding: 0.25rem 0.7rem; }
+  .ticker-select { min-width: 160px; font-size: 0.8rem; }
+  .history-metrics { gap: 1rem; padding: 0.65rem 0 1rem; }
+  .history-metric-value { font-size: 0.92rem; }
 
   /* ── Card hover: disable lift on mobile (touch devices) ─────────── */
   .card:hover         { transform: none; box-shadow: none; }
