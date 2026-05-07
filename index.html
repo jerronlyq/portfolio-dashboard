@@ -129,7 +129,8 @@
           <div class="widget card" id="widget-3">
             <h3 class="widget-title" id="title-prof">Unrealized Profit</h3>
             <p class="widget-value profit-positive" id="total-profit">$0.00</p>
-            <i data-feather="trending-up" class="widget-icon"></i>
+            <span class="widget-badge" id="trade-return-badge" style="display:none">+0.00%</span>
+            <i data-feather="trending-up" class="widget-icon" id="widget-3-icon"></i>
           </div>
         </section>
 
@@ -161,14 +162,15 @@
                 <tbody id="holdings-body"></tbody>
               </table>
 
-              <table id="table-realized" class="hidden" style="display:none;">
+              <table id="table-realized" class="hidden">
                 <thead>
                   <tr>
                     <th data-sort="date" class="sortable">Date</th>
                     <th data-sort="ticker" class="sortable">Ticker</th>
                     <th data-sort="category" class="sortable">Category</th>
-                    <th data-sort="profit" class="sortable">Realized Profit</th>
-                    <th data-sort="profitPct" class="sortable">Profit %</th>
+                    <th data-sort="type" class="sortable">Type</th>
+                    <th data-sort="profit" class="sortable">Realized P&amp;L</th>
+                    <th data-sort="profitPct" class="sortable">Return %</th>
                   </tr>
                 </thead>
                 <tbody id="realized-body"></tbody>
@@ -187,7 +189,7 @@
       <!-- Chart card (shown when data exists) -->
       <section class="card history-card" id="history-chart-section">
         <div class="history-header">
-          <h2 class="section-title" style="margin-bottom:0; border:none; padding:0;">Portfolio Performance</h2>
+          <h2 class="section-title">Portfolio Performance</h2>
           <div class="date-range-group">
             <button class="range-btn active" data-range="1W">1W</button>
             <button class="range-btn" data-range="1M">1M</button>
@@ -206,7 +208,7 @@
       <div id="history-empty" class="card history-empty hidden">
         <i data-feather="bar-chart-2" class="empty-icon"></i>
         <p class="empty-title">No snapshot data yet.</p>
-        <p class="empty-sub">Open Data Sources above, paste your Snapshots CSV URL, and click Sync Snapshots.<br>The Apps Script trigger will begin populating data at 8am SGT each day.</p>
+        <p class="empty-sub">Open Data Sources above, paste your Snapshots CSV URL, and click Sync Snapshots.</p>
       </div>
 
     </div>

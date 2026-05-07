@@ -42,6 +42,8 @@ const findValue = (row, keys) => {
 
 const nameOf = (ticker) => TICKER_NAME_MAP[ticker] || ticker;
 
+const toDisplayCurrency = (v) => activeCurrency === 'SGD' ? v * currentSgdRate : v;
+
 // Auto-appends .SI for SGD-denominated tickers missing an exchange qualifier
 const normalizeTicker = (raw, currency = 'USD') => {
   let t = String(raw).trim().toUpperCase();
@@ -59,22 +61,22 @@ const FINNHUB_CRYPTO_MAP = {
 };
 const toFinnhubSymbol = (ticker) => FINNHUB_CRYPTO_MAP[ticker] || ticker;
 
+const SOURCE_COLORS = {
+  'Finnhub': 'var(--accent-orange)',
+  'Yahoo':   'var(--accent-cyan)',
+  'Google':  'var(--accent-red)',
+};
+
 const formatCurrency = (value) => {
-  let displayVal = value;
-  let currencyCode = 'USD';
-  if (activeCurrency === 'SGD') {
-    displayVal = value * currentSgdRate;
-    currencyCode = 'SGD';
-  }
   return new Intl.NumberFormat('en-US', {
-    style: 'currency', currency: currencyCode,
+    style: 'currency', currency: activeCurrency === 'SGD' ? 'SGD' : 'USD',
     minimumFractionDigits: 2, maximumFractionDigits: 2
-  }).format(displayVal);
+  }).format(toDisplayCurrency(value));
 };
 
 // Compact axis-label formatter: $182k, $1.2M, etc.
 const formatAxisValue = (val) => {
-  const converted = activeCurrency === 'SGD' ? val * currentSgdRate : val;
+  const converted = toDisplayCurrency(val);
   const symbol    = activeCurrency === 'SGD' ? 'S$' : '$';
   if (converted >= 1_000_000) return `${symbol}${(converted / 1_000_000).toFixed(1)}M`;
   if (converted >= 1_000)     return `${symbol}${(converted / 1_000).toFixed(0)}k`;
@@ -330,21 +332,16 @@ async function refreshPrices() {
 document.addEventListener('DOMContentLoaded', async () => {
   await fetchExchangeRate();
   try { if (typeof feather !== 'undefined') feather.replace(); } catch (e) {}
+  if (typeof Chart !== 'undefined') {
+    Chart.defaults.color = '#94a3b8';
+    Chart.defaults.font.family = "'Outfit', sans-serif";
+  }
 
   // ── Data sources collapsible panel ───────────────────────────────────────
 
   const sourcesToggle = document.getElementById('sources-toggle');
   const sourcesBody   = document.getElementById('sources-body');
   const chevron       = document.getElementById('sources-chevron');
-
-  function openSourcesPanel() {
-    sourcesBody.classList.add('open');
-    if (chevron) chevron.style.transform = 'rotate(180deg)';
-  }
-  function closeSourcesPanel() {
-    sourcesBody.classList.remove('open');
-    if (chevron) chevron.style.transform = 'rotate(0deg)';
-  }
 
   sourcesToggle.addEventListener('click', () => {
     const isNowOpen = sourcesBody.classList.toggle('open');
@@ -354,7 +351,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Restore panel state — open by default on first visit
   const panelState = localStorage.getItem('sources_panel_open');
-  if (panelState === 'true' || panelState === null) openSourcesPanel();
+  if (panelState === 'true' || panelState === null) {
+    sourcesBody.classList.add('open');
+    if (chevron) chevron.style.transform = 'rotate(180deg)';
+  }
 
   updateSourcePills();
 
@@ -594,22 +594,31 @@ function handleSnapshotData(rows) {
   if (currentTab === 'history') renderHistoryTab();
 }
 
-// Pivot flat CSV rows into { dates[], tickers[], series{} } for charting
+// Pivot flat CSV rows into { dates[], tickers[], series{}, prices{}, shares{} } for charting
 function processSnapshotData(rows) {
-  const dateMap   = {};
-  const tickerSet = new Set();
+  const dateMap    = {};
+  const priceMap   = {};
+  const sharesMap  = {};
+  const tickerSet  = new Set();
 
   rows.forEach(row => {
     const date           = (findValue(row, ['date']) || '').trim();
     const ticker         = (findValue(row, ['ticker', 'symbol']) || '').trim().toUpperCase();
     const totalUSD       = parseNum(findValue(row, ['total value']));
     const portfolioTotal = parseNum(findValue(row, ['portfolio total']));
+    const priceUSD       = parseNum(findValue(row, ['price usd', 'price', 'unit price', 'close price', 'close']));
+    const sharesCount    = parseNum(findValue(row, ['shares', 'share', 'qty', 'quantity']));
 
     if (!date || !ticker) return;
     tickerSet.add(ticker);
-    if (!dateMap[date]) dateMap[date] = {};
+    if (!dateMap[date])   dateMap[date]   = {};
+    if (!priceMap[date])  priceMap[date]  = {};
+    if (!sharesMap[date]) sharesMap[date] = {};
+
     dateMap[date][ticker]      = totalUSD;
     dateMap[date]['__TOTAL__'] = portfolioTotal;
+    priceMap[date][ticker]     = priceUSD;
+    sharesMap[date][ticker]    = sharesCount;
   });
 
   const dates   = Object.keys(dateMap).sort();
@@ -618,7 +627,14 @@ function processSnapshotData(rows) {
   const series = { '__TOTAL__': dates.map(d => dateMap[d]['__TOTAL__'] || 0) };
   tickers.forEach(t => { series[t] = dates.map(d => dateMap[d][t] || 0); });
 
-  return { dates, tickers, series };
+  const prices = {};
+  const shares = {};
+  tickers.forEach(t => {
+    prices[t] = dates.map(d => priceMap[d]?.[t]  || 0);
+    shares[t] = dates.map(d => sharesMap[d]?.[t] || 0);
+  });
+
+  return { dates, tickers, series, prices, shares };
 }
 
 // Slice snapshot data to the selected date range
@@ -633,12 +649,16 @@ function filterByRange(data, range) {
   const cutoffStr = cutoff.toISOString().split('T')[0];
   const indices   = data.dates.map((d, i) => d >= cutoffStr ? i : -1).filter(i => i >= 0);
 
+  const sliceMap = (obj) => Object.fromEntries(
+    Object.entries(obj || {}).map(([k, v]) => [k, indices.map(i => v[i])])
+  );
+
   return {
     dates:   indices.map(i => data.dates[i]),
     tickers: data.tickers,
-    series:  Object.fromEntries(
-      Object.entries(data.series).map(([k, v]) => [k, indices.map(i => v[i])])
-    )
+    series:  sliceMap(data.series),
+    prices:  sliceMap(data.prices),
+    shares:  sliceMap(data.shares),
   };
 }
 
@@ -711,19 +731,35 @@ async function processData(data, targetTab, showLoader = true) {
       const rowCurrency = (findValue(row, ['currency', 'base']) || 'USD').trim().toUpperCase();
       const stockName   = nameOf(normalizeTicker(rawTicker, rowCurrency));
 
-      const category = findValue(row, ['category', 'sector', 'type']) || 'Other';
+      // 'type' is read separately so it doesn't bleed into the category lookup
+      const rawType = findValue(row, ['type', 'return type', 'income type', 'transaction type']) || '';
+      const type    = rawType.toLowerCase().includes('div') ? 'Dividend' : 'Trade';
+
+      const category = findValue(row, ['category', 'sector']) || 'Other';
       const shares   = parseNum(findValue(row, ['share', 'qty', 'quantity']));
       const date     = findValue(row, ['date', 'closed', 'time']) || 'Historical';
 
-      let totalBuyCost   = parseNum(findValue(row, ['total buy cost', 'buy cost', 'cost']));
-      let totalSellPrice = parseNum(findValue(row, ['total sell price', 'sell price', 'proceeds', 'sell']));
-      const commission   = parseNum(findValue(row, ['commission', 'fee']));
+      let totalBuyCost   = 0;
+      let totalSellPrice = 0;
+      let profit         = 0;
+      let profitPct      = 0;
 
-      let profit = parseNum(findValue(row, ['profit', 'realized profit', 'profits']));
-      if (profit === 0 && totalSellPrice > 0) profit = totalSellPrice - totalBuyCost - commission;
+      if (type === 'Dividend') {
+        // Dividend rows: profit = cash received, no buy/sell cost basis
+        profit    = parseNum(findValue(row, ['profit', 'realized profit', 'dividend', 'income', 'payout', 'amount', 'cash']));
+        profitPct = parseNum(findValue(row, ['% of profit', 'profit %', 'yield', 'yield %', 'return']));
+      } else {
+        // Trade rows: derive profit from buy/sell/commission
+        totalBuyCost   = parseNum(findValue(row, ['total buy cost', 'buy cost', 'cost']));
+        totalSellPrice = parseNum(findValue(row, ['total sell price', 'sell price', 'proceeds', 'sell']));
+        const commission = parseNum(findValue(row, ['commission', 'fee']));
 
-      let profitPct = parseNum(findValue(row, ['% of profit', 'profit %', 'return', 'gain %', 'gain']));
-      if (profitPct === 0 && totalBuyCost > 0) profitPct = (profit / totalBuyCost) * 100;
+        profit = parseNum(findValue(row, ['profit', 'realized profit', 'profits']));
+        if (profit === 0 && totalSellPrice > 0) profit = totalSellPrice - totalBuyCost - commission;
+
+        profitPct = parseNum(findValue(row, ['% of profit', 'profit %', 'return', 'gain %', 'gain']));
+        if (profitPct === 0 && totalBuyCost > 0) profitPct = (profit / totalBuyCost) * 100;
+      }
 
       if (rowCurrency === 'SGD' && currentSgdRate > 0) {
         profit         /= currentSgdRate;
@@ -732,7 +768,7 @@ async function processData(data, targetTab, showLoader = true) {
       }
 
       processedData.push({
-        date, ticker: rawTicker, stockName, category, shares,
+        date, ticker: rawTicker, stockName, category, type, shares,
         profit, profitPct,
         totalCost: totalBuyCost, totalSell: totalSellPrice,
         originalBase: rowCurrency
@@ -755,42 +791,86 @@ function renderDashboard() {
   const isRealized = currentTab === 'realized';
   const data = isRealized ? globalRealizedData : globalActiveData;
 
-  let totalGross = 0, totalCost = 0, totalProfitAgg = 0;
+  const w1 = document.getElementById('widget-1');
+  const w2 = document.getElementById('widget-2');
+  const tradeBadgeEl = document.getElementById('trade-return-badge');
 
-  data.forEach(item => {
-    if (isRealized) {
-      totalGross     += item.totalSell || 0;
-      totalCost      += item.totalCost || 0;
-      totalProfitAgg += item.profit    || 0;
-    } else {
+  const setBadge = (el, pct) => {
+    el.textContent = `${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%`;
+    el.style.backgroundColor = pct >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)';
+    el.style.color = pct >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+  };
+
+  if (isRealized) {
+    // ── Split dividends vs closed trades ──────────────────────────────────
+    let dividendTotal    = 0;
+    let tradeProfitTotal = 0;
+    let tradeCostTotal   = 0;
+    data.forEach(item => {
+      if (item.type === 'Dividend') {
+        dividendTotal += item.profit || 0;
+      } else {
+        tradeProfitTotal += item.profit    || 0;
+        tradeCostTotal   += item.totalCost || 0;
+      }
+    });
+    const totalRealizedProfit = dividendTotal + tradeProfitTotal;
+    const overallReturn = tradeCostTotal > 0 ? (totalRealizedProfit / tradeCostTotal) * 100 : 0;
+    const tradeReturn   = tradeCostTotal > 0 ? (tradeProfitTotal    / tradeCostTotal) * 100 : 0;
+
+    if (w1) w1.style.display = 'flex';
+    if (w2) w2.style.display = 'flex';
+
+    document.getElementById('title-val').textContent  = 'Total Realized P&L';
+    document.getElementById('title-cost').textContent = 'Dividend Payout';
+    document.getElementById('title-prof').textContent = 'Closed Trade P&L';
+
+    const totalValEl = document.getElementById('total-value');
+    totalValEl.textContent = formatCurrency(totalRealizedProfit);
+    totalValEl.className   = `widget-value ${totalRealizedProfit >= 0 ? 'profit-positive' : 'profit-negative'}`;
+
+    const totalCostEl = document.getElementById('total-cost');
+    totalCostEl.textContent = formatCurrency(dividendTotal);
+    totalCostEl.className   = `widget-value ${dividendTotal >= 0 ? 'profit-positive' : 'profit-negative'}`;
+
+    const profitEl = document.getElementById('total-profit');
+    profitEl.textContent = formatCurrency(tradeProfitTotal);
+    profitEl.className   = `widget-value ${tradeProfitTotal >= 0 ? 'profit-positive' : 'profit-negative'}`;
+
+    setBadge(document.getElementById('total-return-badge'), overallReturn);
+    if (tradeBadgeEl) { tradeBadgeEl.style.display = 'inline-block'; setBadge(tradeBadgeEl, tradeReturn); }
+
+  } else {
+    // ── Active portfolio ───────────────────────────────────────────────────
+    let totalGross = 0, totalCost = 0, totalProfitAgg = 0;
+    data.forEach(item => {
       totalGross     += item.totalMktVal || 0;
       totalCost      += (item.totalMktVal - item.profit) || 0;
       totalProfitAgg += item.profit || 0;
-    }
-  });
+    });
+    const overallReturn = totalCost > 0 ? (totalProfitAgg / totalCost) * 100 : 0;
 
-  const overallReturn = totalCost > 0 ? (totalProfitAgg / totalCost) * 100 : 0;
+    if (w1) w1.style.display = 'flex';
+    if (w2) w2.style.display = 'flex';
 
-  const w1 = document.getElementById('widget-1');
-  const w2 = document.getElementById('widget-2');
-  if (w1) w1.style.display = isRealized ? 'none' : 'flex';
-  if (w2) w2.style.display = isRealized ? 'none' : 'flex';
+    document.getElementById('title-val').textContent  = 'Total Market Value';
+    document.getElementById('title-cost').textContent = 'Total Cost Value';
+    document.getElementById('title-prof').textContent = 'Unrealized Profit';
 
-  document.getElementById('title-val').textContent  = isRealized ? 'Total Cash Recovered' : 'Total Market Value';
-  document.getElementById('title-cost').textContent = isRealized ? 'Total Capital Pledged' : 'Total Cost Value';
-  document.getElementById('title-prof').textContent = isRealized ? 'Total Realized Gain'   : 'Unrealized Profit';
+    const totalValEl = document.getElementById('total-value');
+    totalValEl.textContent = formatCurrency(totalGross);
+    totalValEl.className   = 'widget-value';
 
-  document.getElementById('total-value').textContent = formatCurrency(totalGross);
-  document.getElementById('total-cost').textContent  = formatCurrency(totalCost);
+    document.getElementById('total-cost').textContent = formatCurrency(totalCost);
+    document.getElementById('total-cost').className   = 'widget-value';
 
-  const profitEl = document.getElementById('total-profit');
-  profitEl.textContent = formatCurrency(totalProfitAgg);
-  profitEl.className = `widget-value ${totalProfitAgg >= 0 ? 'profit-positive' : 'profit-negative'}`;
+    const profitEl = document.getElementById('total-profit');
+    profitEl.textContent = formatCurrency(totalProfitAgg);
+    profitEl.className   = `widget-value ${totalProfitAgg >= 0 ? 'profit-positive' : 'profit-negative'}`;
 
-  const badgeEl = document.getElementById('total-return-badge');
-  badgeEl.textContent = `${overallReturn >= 0 ? '+' : ''}${overallReturn.toFixed(2)}%`;
-  badgeEl.style.backgroundColor = overallReturn >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)';
-  badgeEl.style.color = overallReturn >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+    setBadge(document.getElementById('total-return-badge'), overallReturn);
+    if (tradeBadgeEl) tradeBadgeEl.style.display = 'none';
+  }
 
   const indicator = document.getElementById('data-source-indicator');
   if (indicator) {
@@ -801,9 +881,9 @@ function renderDashboard() {
       const usedYahoo   = data.some(i => i.source === 'Yahoo');
       const usedGoogle  = data.some(i => i.source === 'Google');
       const parts = [];
-      if (usedFinnhub) parts.push(`<span style="color:var(--accent-orange);">Finnhub</span>`);
-      if (usedYahoo)   parts.push(`<span style="color:var(--accent-cyan);">Yahoo Finance</span>`);
-      if (usedGoogle)  parts.push(`<span style="color:var(--accent-red);">Google (Fallback)</span>`);
+      if (usedFinnhub) parts.push(`<span style="color:${SOURCE_COLORS.Finnhub};">Finnhub</span>`);
+      if (usedYahoo)   parts.push(`<span style="color:${SOURCE_COLORS.Yahoo};">Yahoo Finance</span>`);
+      if (usedGoogle)  parts.push(`<span style="color:${SOURCE_COLORS.Google};">Google (Fallback)</span>`);
       indicator.innerHTML = parts.length
         ? `● Data Source: ${parts.join(' & ')}`
         : '● System Output';
@@ -836,6 +916,8 @@ function renderTables(data, isRealized) {
       const sgdBadge = item.originalBase === 'SGD'
         ? ' <span style="font-size:0.6rem;background:rgba(255,255,255,0.1);padding:2px 4px;border-radius:4px;color:#94a3b8;margin-left:4px;">SGD</span>'
         : '';
+      const isDividend = item.type === 'Dividend';
+      const typeBadge  = `<span class="type-badge ${isDividend ? 'dividend' : 'trade'}">${isDividend ? 'Dividend' : 'Trade'}</span>`;
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td class="mobile-date">${item.date}</td>
@@ -844,6 +926,7 @@ function renderTables(data, isRealized) {
           <span style="font-size:0.7rem;color:var(--text-secondary);opacity:0.8;">${item.ticker}${sgdBadge}</span>
         </div></td>
         <td data-label="Category"><span class="category-badge">${item.category}</span></td>
+        <td data-label="Type">${typeBadge}</td>
         <td data-label="P&amp;L" class="${cls}">${sign}${formatCurrency(item.profit || 0)}</td>
         <td data-label="Return" class="${cls}">${sign}${(item.profitPct || 0).toFixed(2)}%</td>
       `;
@@ -864,7 +947,7 @@ function renderTables(data, isRealized) {
       const sgdBadge = item.originalBase === 'SGD'
         ? ' <span style="font-size:0.6rem;background:rgba(255,255,255,0.1);padding:2px 4px;border-radius:4px;color:#94a3b8;margin-left:4px;">SGD</span>'
         : '';
-      const srcColor = item.source === 'Finnhub' ? 'var(--accent-orange)' : item.source === 'Yahoo' ? 'var(--accent-cyan)' : 'var(--accent-red)';
+      const srcColor = SOURCE_COLORS[item.source] || 'var(--accent-red)';
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td class="ticker-cell"><div style="display:flex;flex-direction:column;">
@@ -893,7 +976,7 @@ function renderChart(data, isRealized) {
   data.forEach(item => {
     if (!allocations[item.category]) allocations[item.category] = 0;
     const rawVal = isRealized ? (item.totalSell || Math.abs(item.profit)) : item.totalMktVal;
-    allocations[item.category] += activeCurrency === 'SGD' ? rawVal * currentSgdRate : rawVal;
+    allocations[item.category] += toDisplayCurrency(rawVal);
   });
 
   const labels = Object.keys(allocations);
@@ -906,9 +989,6 @@ function renderChart(data, isRealized) {
   const palette = isRealized
     ? ['#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#6366f1']
     : ['#06b6d4', '#8b5cf6', '#10b981', '#3b82f6', '#f59e0b', '#ec4899'];
-
-  Chart.defaults.color = '#94a3b8';
-  Chart.defaults.font.family = "'Outfit', sans-serif";
 
   allocationChartInstance = new Chart(canvas.getContext('2d'), {
     type: 'doughnut',
@@ -1005,8 +1085,9 @@ function renderHistoryChart() {
     return prev > 0 ? ((v - prev) / prev) * 100 : null;
   });
 
-  Chart.defaults.color = '#94a3b8';
-  Chart.defaults.font.family = "'Outfit', sans-serif";
+  // Per-date stock price and share count (only meaningful when a ticker is selected)
+  const pricesAtDate = selectedTicker ? (filtered.prices?.[selectedTicker] || []) : [];
+  const sharesAtDate = selectedTicker ? (filtered.shares?.[selectedTicker] || []) : [];
 
   historyChartInstance = new Chart(canvas.getContext('2d'), {
     type: 'line',
@@ -1042,12 +1123,20 @@ function renderHistoryChart() {
           padding: 14,
           callbacks: {
             label: (ctx) => {
-              const pct = pctChanges[ctx.dataIndex];
+              const idx   = ctx.dataIndex;
+              const pct   = pctChanges[idx];
               const lines = [` ${ctx.dataset.label}: ${formatCurrency(ctx.raw)}`];
+
               if (pct !== null) {
                 const arrow = pct >= 0 ? '▲' : '▼';
                 lines.push(` ${arrow} ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}% vs prev day`);
               }
+
+              const price  = pricesAtDate[idx];
+              const shares = sharesAtDate[idx];
+              if (price  > 0) lines.push(` Stock Price : ${formatCurrency(price)}`);
+              if (shares > 0) lines.push(` Shares Held : ${shares.toLocaleString()}`);
+
               return lines;
             }
           }
