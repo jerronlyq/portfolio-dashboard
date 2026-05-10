@@ -64,7 +64,6 @@ const toFinnhubSymbol = (ticker) => FINNHUB_CRYPTO_MAP[ticker] || ticker;
 const SOURCE_COLORS = {
   'Finnhub': 'var(--accent-orange)',
   'Yahoo':   'var(--accent-cyan)',
-  'Google':  'var(--accent-red)',
 };
 
 const formatCurrency = (value) => {
@@ -93,10 +92,10 @@ function updateLastRefreshed() {
 
 function updateSourcePills() {
   [
-    { id: 'pill-active',    key: 'saved_csv_url',      cls: 'pill-cyan'   },
-    { id: 'pill-realized',  key: 'saved_realized_url', cls: 'pill-purple' },
-    { id: 'pill-snapshots', key: 'saved_snapshot_url', cls: 'pill-green'  },
-    { id: 'pill-finnhub',   key: 'finnhub_api_key',    cls: 'pill-orange' },
+    { id: 'pill-active',      key: 'saved_csv_url',        cls: 'pill-cyan'   },
+    { id: 'pill-realized',    key: 'saved_realized_url',   cls: 'pill-purple' },
+    { id: 'pill-snapshots',   key: 'saved_snapshot_url',   cls: 'pill-green'  },
+    { id: 'pill-finnhub',     key: 'finnhub_api_key',      cls: 'pill-orange' },
   ].forEach(({ id, key, cls }) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -104,23 +103,7 @@ function updateSourcePills() {
   });
 }
 
-// ── Exchange Rate ─────────────────────────────────────────────────────────────
-
-async function fetchExchangeRate() {
-  try {
-    const response = await fetch('https://open.er-api.com/v6/latest/USD');
-    const data = await response.json();
-    if (data?.rates?.SGD) {
-      currentSgdRate = data.rates.SGD;
-      const display = document.getElementById('exchange-rate-display');
-      if (display) display.textContent = `1 USD = ${currentSgdRate.toFixed(4)} SGD`;
-    }
-  } catch (e) {
-    console.error('Failed to fetch live exchange rate; using 1.35 fallback.', e);
-  }
-}
-
-// ── CORS Proxy Chain ──────────────────────────────────────────────────────────
+// ── CORS Proxy Chain (SGX Yahoo fallback only) ───────────────────────────────
 
 const CORS_PROXIES = [
   url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
@@ -140,6 +123,23 @@ async function fetchWithProxy(targetUrl) {
   }
   return null;
 }
+
+// ── Exchange Rate ─────────────────────────────────────────────────────────────
+
+async function fetchExchangeRate() {
+  try {
+    const response = await fetch('https://open.er-api.com/v6/latest/USD');
+    const data = await response.json();
+    if (data?.rates?.SGD) {
+      currentSgdRate = data.rates.SGD;
+      const display = document.getElementById('exchange-rate-display');
+      if (display) display.textContent = `1 USD = ${currentSgdRate.toFixed(4)} SGD`;
+    }
+  } catch (e) {
+    console.error('Failed to fetch live exchange rate; using 1.35 fallback.', e);
+  }
+}
+
 
 // ── Offline Ticker Name Dictionary ───────────────────────────────────────────
 
@@ -168,7 +168,7 @@ const TICKER_NAME_MAP = {
   'DBS': 'DBS Group Holdings Ltd', 'D05.SI': 'DBS Group Holdings Ltd',
   'OCBC': 'OCBC Bank', 'O39.SI': 'OCBC Bank',
   'UOB': 'United Overseas Bank (UOB)', 'U11.SI': 'United Overseas Bank (UOB)',
-  'Z74.SI': 'Singtel', 'C38U.SI': 'CapitaLand Integrated Commercial Trust',
+  'Z74.SI': 'Singtel', 'C38U.SI': 'CapitaLand Integrated Commercial Trust', 'C6L.SI': 'Singapore Airlines',
   'BTC-USD': 'Bitcoin', 'ETH-USD': 'Ethereum', 'SOL-USD': 'Solana'
 };
 
@@ -187,7 +187,7 @@ async function fetchLivePrices(tickers) {
 
   const finnhubKey = localStorage.getItem('finnhub_api_key') || '';
 
-  // ── 1. Finnhub — direct CORS, no proxy needed (US stocks, ETFs, crypto) ────
+  // ── 1. Finnhub — US stocks, ETFs, crypto (direct CORS, no proxy) ─────────
   if (finnhubKey) {
     const finnhubTickers = cleanTickers.filter(t => !t.endsWith('.SI'));
     await Promise.all(finnhubTickers.map(async (ticker) => {
@@ -212,82 +212,42 @@ async function fetchLivePrices(tickers) {
     }));
   }
 
-  // ── 2. Yahoo Spark v8 — for SGX (.SI) tickers and any Finnhub misses ──────
-  const afterFinnhub = cleanTickers.filter(t => !dictionary[t]?.price);
-  if (afterFinnhub.length > 0) {
+  // ── 2. Yahoo Finance — SGX (.SI) tickers via CORS proxy ─────────────────
+  const sgxMisses = cleanTickers.filter(t => t.endsWith('.SI') && !dictionary[t]?.price);
+  if (sgxMisses.length > 0) {
     try {
-      const sparkUrl = `https://query1.finance.yahoo.com/v8/finance/spark?symbols=${afterFinnhub.join(',')}&range=1d&interval=1d`;
-      const res = await fetchWithProxy(sparkUrl);
-      if (res) {
-        const data = await res.json();
-        (data?.spark?.result || []).forEach(item => {
-          const symbol   = item?.symbol?.toUpperCase();
-          if (!symbol) return;
-          const response = item?.response?.[0];
-          const closes   = (response?.indicators?.quote?.[0]?.close || []).filter(p => p != null);
-          const price    = closes[closes.length - 1] ?? response?.meta?.regularMarketPrice;
-          if (price) {
-            dictionary[symbol] = { price, name: nameOf(symbol), source: 'Yahoo' };
-            console.log(`[Spark v8] ${symbol}: ${price}`);
+      await Promise.all(sgxMisses.map(async (ticker) => {
+        try {
+          const url = `https://query2.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`;
+          const res = await fetchWithProxy(url);
+          if (res) {
+            const data = await res.json();
+            const meta  = data?.chart?.result?.[0]?.meta;
+            const price = meta?.regularMarketPrice;
+            if (price) {
+              dictionary[ticker] = { price, name: nameOf(ticker), source: 'Yahoo' };
+              console.log(`[Yahoo SGX] ✓ ${ticker}: ${price}`);
+            } else {
+              console.warn(`[Yahoo SGX] ✗ ${ticker}: no price in response`, data);
+            }
           }
-        });
-      }
-    } catch (e) {
-      console.warn('[Spark v8] batch fetch failed:', e);
-    }
-  }
-
-  // ── 3. Yahoo v7 Quote — final fallback ────────────────────────────────────
-  const afterSpark = cleanTickers.filter(t => !dictionary[t]?.price);
-  if (afterSpark.length > 0) {
-    try {
-      const quoteUrl = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${afterSpark.join(',')}`;
-      const res = await fetchWithProxy(quoteUrl);
-      if (res) {
-        const data = await res.json();
-        (data?.quoteResponse?.result || []).forEach(item => {
-          const symbol = item?.symbol?.toUpperCase();
-          const price  = item?.regularMarketPrice;
-          if (symbol && price) {
-            dictionary[symbol] = {
-              price,
-              name: item.shortName || item.longName || nameOf(symbol),
-              source: 'Yahoo'
-            };
-            console.log(`[v7 Quote] ${symbol}: ${price}`);
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('[v7 Quote] fallback failed:', e);
-    }
-  }
-
-  // ── 4. Static names; live name lookup only for priced tickers ─────────────
-  await Promise.all(cleanTickers.map(async (ticker) => {
-    if (TICKER_NAME_MAP[ticker]) {
-      if (dictionary[ticker]) dictionary[ticker].name = TICKER_NAME_MAP[ticker];
-      else dictionary[ticker] = { price: 0, name: TICKER_NAME_MAP[ticker] };
-      return;
-    }
-    if (!dictionary[ticker]?.price) return;
-    if (dictionary[ticker].name && dictionary[ticker].name !== ticker) return;
-    try {
-      const searchUrl = `https://query2.finance.yahoo.com/v1/finance/search?q=${ticker}`;
-      const res = await fetchWithProxy(searchUrl);
-      if (res) {
-        const searchData = await res.json();
-        if (searchData?.quotes?.length > 0) {
-          const match = searchData.quotes.find(q => q.symbol === ticker) || searchData.quotes[0];
-          const realName = match.shortname || match.longname || ticker;
-          if (dictionary[ticker]) dictionary[ticker].name = realName;
-          else dictionary[ticker] = { price: 0, name: realName };
+        } catch (e) {
+          console.warn(`[Yahoo SGX] failed for ${ticker}:`, e);
         }
-      }
+      }));
     } catch (e) {
-      console.warn(`[Name lookup] failed for ${ticker}:`, e);
+      console.warn('[Yahoo SGX] fallback failed:', e);
     }
-  }));
+  }
+
+  // ── 4. Apply static names ─────────────────────────────────────────────────
+  cleanTickers.forEach(ticker => {
+    const staticName = TICKER_NAME_MAP[ticker];
+    if (staticName) {
+      if (dictionary[ticker]) dictionary[ticker].name = staticName;
+      else dictionary[ticker] = { price: 0, name: staticName };
+    }
+  });
 
   console.log('[fetchLivePrices] result:', dictionary);
   return dictionary;
@@ -319,7 +279,7 @@ async function refreshPrices() {
     const profit       = totalMktVal - totalCostVal;
     const profitPct    = totalCostVal > 0 ? (profit / totalCostVal) * 100 : 0;
 
-    return { ...item, mktPrice, totalMktVal, profit, profitPct, source: dictData.source || 'Yahoo' };
+    return { ...item, mktPrice, totalMktVal, profit, profitPct, source: dictData.source };
   });
 
   updateLastRefreshed();
@@ -693,7 +653,7 @@ async function processData(data, targetTab, showLoader = true) {
       let totalCostVal = parseNum(findValue(row, ['total cost price', 'total cost value', 'total cost', 'cost price', 'purchase']));
 
       const dictData = pricesDict[cleanTicker];
-      let dataSource = dictData?.source || (dictData?.price ? 'Yahoo' : 'Google');
+      let dataSource = dictData?.source || '';
       let mktPrice   = dictData?.price || 0;
       let stockName  = dictData?.name  || nameOf(cleanTicker);
 
@@ -879,11 +839,9 @@ function renderDashboard() {
     } else {
       const usedFinnhub = data.some(i => i.source === 'Finnhub');
       const usedYahoo   = data.some(i => i.source === 'Yahoo');
-      const usedGoogle  = data.some(i => i.source === 'Google');
       const parts = [];
       if (usedFinnhub) parts.push(`<span style="color:${SOURCE_COLORS.Finnhub};">Finnhub</span>`);
       if (usedYahoo)   parts.push(`<span style="color:${SOURCE_COLORS.Yahoo};">Yahoo Finance</span>`);
-      if (usedGoogle)  parts.push(`<span style="color:${SOURCE_COLORS.Google};">Google (Fallback)</span>`);
       indicator.innerHTML = parts.length
         ? `● Data Source: ${parts.join(' & ')}`
         : '● System Output';
@@ -1101,7 +1059,7 @@ function renderHistoryChart() {
         borderWidth: selectedTicker ? 2 : 3,
         pointRadius: 3,
         pointHoverRadius: 6,
-        tension: 0.3,
+        tension: 0,
         fill: !selectedTicker
       }]
     },
