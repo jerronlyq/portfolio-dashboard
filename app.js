@@ -14,8 +14,9 @@ DBS,Bank,5000.00,100,6000.00,10.00,SGD`;
 // Per-ticker line colours — shared between chips and chart datasets
 const CHART_COLORS = ['#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#ec4899', '#6366f1', '#f97316'];
 
-let allocationChartInstance = null;
-let historyChartInstance    = null;
+let allocationChartInstance   = null;
+let marketValueChartInstance  = null;
+let historyChartInstance      = null;
 
 // ── Global State ──────────────────────────────────────────────────────────────
 let activeCurrency        = 'USD';
@@ -885,6 +886,7 @@ function renderTables(data, isRealized) {
         </div></td>
         <td data-label="Category"><span class="category-badge">${item.category}</span></td>
         <td data-label="Type">${typeBadge}</td>
+        <td data-label="Currency"><span class="currency-badge ${item.originalBase === 'SGD' ? 'sgd' : 'usd'}">${item.originalBase}</span></td>
         <td data-label="P&amp;L" class="${cls}">${sign}${formatCurrency(item.profit || 0)}</td>
         <td data-label="Return" class="${cls}">${sign}${(item.profitPct || 0).toFixed(2)}%</td>
       `;
@@ -962,7 +964,63 @@ function renderChart(data, isRealized) {
           backgroundColor: 'rgba(15,23,42,0.9)', titleColor: '#fff', bodyColor: '#e2e8f0',
           borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
           callbacks: {
-            label: (ctx) => ` ${ctx.label}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: activeCurrency, minimumFractionDigits: 2 }).format(ctx.raw)}`
+            label: (ctx) => {
+              const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+              const pct   = total > 0 ? ((ctx.raw / total) * 100).toFixed(1) : 0;
+              return ` ${ctx.label}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: activeCurrency === 'SGD' ? 'SGD' : 'USD', minimumFractionDigits: 2 }).format(ctx.raw)} (${pct}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+
+  renderMarketValueChart(data, isRealized);
+}
+
+// ── Market Value Chart (by ticker) ────────────────────────────────────────────
+
+function renderMarketValueChart(data, isRealized) {
+  const section = document.getElementById('market-value-chart-section');
+  const canvas  = document.getElementById('marketValueChart');
+  if (!canvas) return;
+
+  if (marketValueChartInstance) { marketValueChartInstance.destroy(); marketValueChartInstance = null; }
+
+  if (isRealized || data.length === 0) {
+    if (section) section.classList.add('hidden');
+    return;
+  }
+  if (section) section.classList.remove('hidden');
+
+  const byTicker = {};
+  data.forEach(item => {
+    const label = item.stockName || item.ticker;
+    byTicker[label] = (byTicker[label] || 0) + toDisplayCurrency(item.totalMktVal || 0);
+  });
+
+  const labels = Object.keys(byTicker);
+  const values = Object.values(byTicker);
+
+  marketValueChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: labels.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]), borderWidth: 0, hoverOffset: 4 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: '75%',
+      plugins: {
+        legend: { position: 'bottom', labels: { padding: 20, usePointStyle: true, pointStyle: 'circle' } },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.9)', titleColor: '#fff', bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
+          callbacks: {
+            label: (ctx) => {
+              const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
+              const pct   = total > 0 ? ((ctx.raw / total) * 100).toFixed(1) : 0;
+              return ` ${ctx.label}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: activeCurrency === 'SGD' ? 'SGD' : 'USD', minimumFractionDigits: 2 }).format(ctx.raw)} (${pct}%)`;
+            }
           }
         }
       }
