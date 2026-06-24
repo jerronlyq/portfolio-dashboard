@@ -1,0 +1,17 @@
+{
+  "name": "Apex Portfolio",
+  "short_name": "Apex",
+  "description": "Investment portfolio metrics, allocations, and performance.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0B0F16",
+  "theme_color": "#0B0F16",
+  "icons": [
+    {
+      "src": "apex-favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

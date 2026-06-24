@@ -72,9 +72,15 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
   gap: 0.75rem;
 }
 
-.logo-title i {
+.logo-mark-img {
+  width: 32px;
+  height: 32px;
   filter: drop-shadow(0 0 8px var(--accent-cyan-glow));
+  flex-shrink: 0;
 }
+
+.logo-apex     { color: var(--text-primary); }
+.logo-portfolio { color: var(--accent-cyan); }
 
 .logo-meta {
   display: flex;
