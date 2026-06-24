@@ -697,11 +697,13 @@ async function processData(data, targetTab, showLoader = true) {
       const type    = rawType.toLowerCase().includes('div') ? 'Dividend' : 'Trade';
 
       const category = findValue(row, ['category', 'sector']) || 'Other';
-      const shares   = parseNum(findValue(row, ['share', 'qty', 'quantity']));
+      const shares   = parseNum(findValue(row, ['shares sold', 'share', 'qty', 'quantity']));
       const date     = findValue(row, ['date', 'closed', 'time']) || 'Historical';
 
       let totalBuyCost   = 0;
       let totalSellPrice = 0;
+      let sellPrice      = 0;
+      let commission     = 0;
       let profit         = 0;
       let profitPct      = 0;
 
@@ -713,7 +715,8 @@ async function processData(data, targetTab, showLoader = true) {
         // Trade rows: derive profit from buy/sell/commission
         totalBuyCost   = parseNum(findValue(row, ['total buy cost', 'buy cost', 'cost']));
         totalSellPrice = parseNum(findValue(row, ['total sell price', 'sell price', 'proceeds', 'sell']));
-        const commission = parseNum(findValue(row, ['commission', 'fee']));
+        sellPrice      = parseNum(findValue(row, ['transacted price', 'transaction price', 'transacted']));
+        commission     = parseNum(findValue(row, ['commission', 'fee']));
 
         profit = parseNum(findValue(row, ['profit', 'realized profit', 'profits']));
         if (profit === 0 && totalSellPrice > 0) profit = totalSellPrice - totalBuyCost - commission;
@@ -726,12 +729,15 @@ async function processData(data, targetTab, showLoader = true) {
         profit         /= currentSgdRate;
         totalBuyCost   /= currentSgdRate;
         totalSellPrice /= currentSgdRate;
+        sellPrice      /= currentSgdRate;
+        commission     /= currentSgdRate;
       }
 
       processedData.push({
         date, ticker: rawTicker, stockName, category, type, shares,
         profit, profitPct,
         totalCost: totalBuyCost, totalSell: totalSellPrice,
+        sellPrice, commission,
         originalBase: rowCurrency
       });
     }
@@ -887,6 +893,9 @@ function renderTables(data, isRealized) {
         <td data-label="Category"><span class="category-badge">${item.category}</span></td>
         <td data-label="Type">${typeBadge}</td>
         <td data-label="Currency"><span class="currency-badge ${item.originalBase === 'SGD' ? 'sgd' : 'usd'}">${item.originalBase}</span></td>
+        <td data-label="Shares">${item.shares > 0 ? item.shares.toLocaleString() : '–'}</td>
+        <td data-label="Sell Price">${item.sellPrice > 0 ? formatCurrency(item.sellPrice) : '–'}</td>
+        <td data-label="Fees">${item.commission > 0 ? formatCurrency(item.commission) : '–'}</td>
         <td data-label="P&amp;L" class="${cls}">${sign}${formatCurrency(item.profit || 0)}</td>
         <td data-label="Return" class="${cls}">${sign}${(item.profitPct || 0).toFixed(2)}%</td>
       `;
