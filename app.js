@@ -15,8 +15,8 @@ DBS,Bank,5000.00,100,6000.00,10.00,SGD`;
 const CHART_COLORS = ['#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#ec4899', '#6366f1', '#f97316'];
 
 let allocationChartInstance   = null;
-let marketValueChartInstance  = null;
 let historyChartInstance      = null;
+let monthlyChartInstance      = null;
 
 // ── Global State ──────────────────────────────────────────────────────────────
 let activeCurrency        = 'USD';
@@ -29,6 +29,9 @@ let globalSnapshotData    = null;   // { dates[], tickers[], series{} }
 let lastPriceUpdate       = null;
 let activeHistoryRange    = 'All';
 let selectedHistoryTickers = new Set();
+let selectedRealizedYear  = 'All';
+
+const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 // ── Module-Level Utilities ────────────────────────────────────────────────────
 
@@ -444,6 +447,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   const refreshBtn = document.getElementById('refresh-btn');
   if (refreshBtn) refreshBtn.addEventListener('click', refreshPrices);
 
+  // ── Re-measure dumbbell chart on resize (pixel-based, not CSS %) ──────────
+
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (currentTab === 'active') renderAllocationDumbbell(globalActiveData);
+    }, 150);
+  });
+
   // ── Date range buttons ────────────────────────────────────────────────────
 
   document.querySelectorAll('.range-btn').forEach(btn => {
@@ -676,7 +689,7 @@ async function processData(data, targetTab, showLoader = true) {
       processedData.push({
         ticker: rawTicker, stockName,
         category: findValue(row, ['category', 'sector', 'type']) || 'Other',
-        shares, costPrice, mktPrice, totalMktVal, profit, profitPct,
+        shares, costPrice, totalCost: totalCostVal, mktPrice, totalMktVal, profit, profitPct,
         source: dataSource, originalBase: rowCurrency
       });
     }
@@ -743,10 +756,145 @@ async function processData(data, targetTab, showLoader = true) {
     }
 
     globalRealizedData = processedData;
+    selectedRealizedYear = 'All';
     if (currentTab === 'realized') renderDashboard();
   }
 
   if (loader) loader.classList.add('hidden');
+}
+
+// ── Realized: Yearly Summary + Monthly Breakdown ─────────────────────────────
+
+const getRealizedYear = (dateStr) => {
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? 'Unknown' : d.getFullYear();
+};
+
+function computeYearlySummary(data) {
+  const map = {};
+  data.forEach(item => {
+    const year = getRealizedYear(item.date);
+    if (!map[year]) map[year] = { year, dividends: 0, tradeProfit: 0 };
+    if (item.type === 'Dividend') {
+      map[year].dividends += item.profit || 0;
+    } else {
+      map[year].tradeProfit += item.profit || 0;
+    }
+  });
+
+  return Object.values(map)
+    .map(y => ({ ...y, totalRealized: y.dividends + y.tradeProfit }))
+    .sort((a, b) => a.year === 'Unknown' ? 1 : b.year === 'Unknown' ? -1 : b.year - a.year);
+}
+
+function renderYearlySummaryTable(data) {
+  const tbody = document.getElementById('yearly-body');
+  if (!tbody) return;
+
+  tbody.innerHTML = '';
+  computeYearlySummary(data).forEach(y => {
+    const totalCls = y.totalRealized >= 0 ? 'profit-positive' : 'profit-negative';
+    const totalSign = y.totalRealized >= 0 ? '+' : '';
+    const tradeCls = y.tradeProfit >= 0 ? 'profit-positive' : 'profit-negative';
+    const tradeSign = y.tradeProfit >= 0 ? '+' : '';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td style="font-weight:600;color:var(--text-primary);">${y.year}</td>
+      <td data-label="Total Realized P&amp;L" class="${totalCls}">${totalSign}${formatCurrency(y.totalRealized)}</td>
+      <td data-label="Annual Dividends">${formatCurrency(y.dividends)}</td>
+      <td data-label="Closed Trade Profit" class="${tradeCls}">${tradeSign}${formatCurrency(y.tradeProfit)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderYearFilter(data) {
+  const container = document.getElementById('year-filter');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const years = [...new Set(data.map(item => getRealizedYear(item.date)))]
+    .filter(y => y !== 'Unknown')
+    .sort((a, b) => b - a);
+
+  const select = document.createElement('select');
+  select.id        = 'year-select';
+  select.className = 'ticker-select';
+
+  const allOpt = document.createElement('option');
+  allOpt.value       = 'All';
+  allOpt.textContent = 'All Years';
+  select.appendChild(allOpt);
+
+  years.forEach(year => {
+    const opt = document.createElement('option');
+    opt.value       = year;
+    opt.textContent = year;
+    select.appendChild(opt);
+  });
+
+  select.value = selectedRealizedYear;
+
+  select.addEventListener('change', () => {
+    selectedRealizedYear = select.value === 'All' ? 'All' : Number(select.value);
+    renderDashboard();
+  });
+
+  container.appendChild(select);
+}
+
+function computeMonthlyBreakdown(data, year) {
+  const dividends   = new Array(12).fill(0);
+  const tradeProfit = new Array(12).fill(0);
+
+  data.forEach(item => {
+    const d = new Date(item.date);
+    if (isNaN(d.getTime())) return;
+    if (year !== 'All' && d.getFullYear() !== year) return;
+
+    const month = d.getMonth();
+    if (item.type === 'Dividend') dividends[month]   += item.profit || 0;
+    else                          tradeProfit[month] += item.profit || 0;
+  });
+
+  return { dividends, tradeProfit };
+}
+
+function renderMonthlyChart(data) {
+  if (typeof Chart === 'undefined') return;
+  const canvas = document.getElementById('monthlyChart');
+  if (!canvas) return;
+  if (monthlyChartInstance) monthlyChartInstance.destroy();
+
+  const { dividends, tradeProfit } = computeMonthlyBreakdown(data, selectedRealizedYear);
+
+  monthlyChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: MONTH_LABELS,
+      datasets: [
+        { label: 'Closed Trade Profit', data: tradeProfit, backgroundColor: 'rgba(16,185,129,0.75)', borderRadius: 4, maxBarThickness: 28 },
+        { label: 'Dividends',           data: dividends,   backgroundColor: 'rgba(139,92,246,0.75)', borderRadius: 4, maxBarThickness: 28 },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', padding: 20 } },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#fff', bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
+          callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatCurrency(ctx.raw)}` }
+        }
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: '#94a3b8' } },
+        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', callback: (val) => formatAxisValue(val) } }
+      }
+    }
+  });
 }
 
 // ── Dashboard Rendering ───────────────────────────────────────────────────────
@@ -855,8 +1003,26 @@ function renderDashboard() {
     }
   }
 
-  renderTables(data, isRealized);
-  try { renderChart(data, isRealized); } catch (e) { console.error('Chart error', e); }
+  const realizedExtra   = document.getElementById('realized-extra');
+  const portfolioContent = document.getElementById('portfolio-content');
+  let tableData = data;
+
+  if (isRealized) {
+    if (realizedExtra) realizedExtra.classList.remove('hidden');
+    portfolioContent?.classList.add('realized-mode');
+    renderYearlySummaryTable(data);
+    renderYearFilter(data);
+    tableData = selectedRealizedYear === 'All'
+      ? data
+      : data.filter(item => getRealizedYear(item.date) === selectedRealizedYear);
+    renderMonthlyChart(data);
+  } else {
+    if (realizedExtra) realizedExtra.classList.add('hidden');
+    portfolioContent?.classList.remove('realized-mode');
+  }
+
+  renderTables(tableData, isRealized);
+  try { renderChart(tableData, isRealized); } catch (e) { console.error('Chart error', e); }
 }
 
 // ── Table Rendering ───────────────────────────────────────────────────────────
@@ -926,6 +1092,7 @@ function renderTables(data, isRealized) {
         <td data-label="Category"><span class="category-badge">${item.category}</span></td>
         <td data-label="Shares">${item.shares.toLocaleString()}</td>
         <td data-label="Cost / Share">${formatCurrency(item.costPrice)}</td>
+        <td data-label="Total Cost">${formatCurrency(item.totalCost)}</td>
         <td data-label="Mkt Price">${formatCurrency(item.mktPrice)} <span style="font-size:0.60rem;color:${srcColor};display:block;">${item.source}</span></td>
         <td data-label="Market Value">${formatCurrency(item.totalMktVal)}</td>
         <td data-label="P&amp;L" class="${cls}">${sign}${formatCurrency(item.profit)}</td>
@@ -939,13 +1106,28 @@ function renderTables(data, isRealized) {
 // ── Allocation Chart ──────────────────────────────────────────────────────────
 
 function renderChart(data, isRealized) {
+  const dumbbellSection = document.getElementById('allocation-dumbbell-section');
+  const categorySection = document.getElementById('realized-allocation-chart');
+
+  if (isRealized) {
+    if (dumbbellSection) dumbbellSection.classList.add('hidden');
+    if (categorySection) categorySection.classList.remove('hidden');
+    renderCategoryAllocationChart(data);
+  } else {
+    if (categorySection) categorySection.classList.add('hidden');
+    if (dumbbellSection) dumbbellSection.classList.remove('hidden');
+    if (allocationChartInstance) { allocationChartInstance.destroy(); allocationChartInstance = null; }
+    renderAllocationDumbbell(data);
+  }
+}
+
+function renderCategoryAllocationChart(data) {
   if (typeof Chart === 'undefined') return;
 
   const allocations = {};
   data.forEach(item => {
     if (!allocations[item.category]) allocations[item.category] = 0;
-    const rawVal = isRealized ? (item.totalSell || Math.abs(item.profit)) : item.totalMktVal;
-    allocations[item.category] += toDisplayCurrency(rawVal);
+    allocations[item.category] += toDisplayCurrency(item.totalSell || Math.abs(item.profit));
   });
 
   const labels = Object.keys(allocations);
@@ -955,9 +1137,7 @@ function renderChart(data, isRealized) {
   if (!canvas) return;
   if (allocationChartInstance) allocationChartInstance.destroy();
 
-  const palette = isRealized
-    ? ['#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#6366f1']
-    : ['#06b6d4', '#8b5cf6', '#10b981', '#3b82f6', '#f59e0b', '#ec4899'];
+  const palette = ['#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#6366f1'];
 
   allocationChartInstance = new Chart(canvas.getContext('2d'), {
     type: 'doughnut',
@@ -983,57 +1163,82 @@ function renderChart(data, isRealized) {
       }
     }
   });
-
-  renderMarketValueChart(data, isRealized);
 }
 
-// ── Market Value Chart (by ticker) ────────────────────────────────────────────
+// ── Cost % vs Market Value % Dumbbell Chart (per holding) ────────────────────
 
-function renderMarketValueChart(data, isRealized) {
-  const section = document.getElementById('market-value-chart-section');
-  const canvas  = document.getElementById('marketValueChart');
-  if (!canvas) return;
+function computeCostMarketBreakdown(data) {
+  const totalCost = data.reduce((sum, item) => sum + (item.totalCost   || 0), 0);
+  const totalMkt  = data.reduce((sum, item) => sum + (item.totalMktVal || 0), 0);
 
-  if (marketValueChartInstance) { marketValueChartInstance.destroy(); marketValueChartInstance = null; }
+  return data
+    .map(item => ({
+      ticker:    item.ticker,
+      stockName: item.stockName,
+      costPct:   totalCost > 0 ? (item.totalCost   / totalCost) * 100 : 0,
+      mktPct:    totalMkt  > 0 ? (item.totalMktVal  / totalMkt)  * 100 : 0,
+    }))
+    .sort((a, b) => b.mktPct - a.mktPct);
+}
 
-  if (isRealized || data.length === 0) {
-    if (section) section.classList.add('hidden');
-    return;
-  }
-  if (section) section.classList.remove('hidden');
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
-  const byTicker = {};
-  data.forEach(item => {
-    const label = item.stockName || item.ticker;
-    byTicker[label] = (byTicker[label] || 0) + toDisplayCurrency(item.totalMktVal || 0);
-  });
+function renderAllocationDumbbell(data) {
+  const container = document.getElementById('allocation-dumbbell');
+  if (!container) return;
 
-  const labels = Object.keys(byTicker);
-  const values = Object.values(byTicker);
+  if (data.length === 0) { container.innerHTML = ''; return; }
 
-  marketValueChartInstance = new Chart(canvas.getContext('2d'), {
-    type: 'doughnut',
-    data: {
-      labels,
-      datasets: [{ data: values, backgroundColor: labels.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]), borderWidth: 0, hoverOffset: 4 }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, cutout: '75%',
-      plugins: {
-        legend: { position: 'bottom', labels: { padding: 20, usePointStyle: true, pointStyle: 'circle' } },
-        tooltip: {
-          backgroundColor: 'rgba(15,23,42,0.9)', titleColor: '#fff', bodyColor: '#e2e8f0',
-          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
-          callbacks: {
-            label: (ctx) => {
-              const total = ctx.chart.data.datasets[0].data.reduce((a, b) => a + b, 0);
-              const pct   = total > 0 ? ((ctx.raw / total) * 100).toFixed(1) : 0;
-              return ` ${ctx.label}: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: activeCurrency === 'SGD' ? 'SGD' : 'USD', minimumFractionDigits: 2 }).format(ctx.raw)} (${pct}%)`;
-            }
-          }
-        }
-      }
-    }
+  const rows   = computeCostMarketBreakdown(data);
+  const maxPct = Math.max(1, ...rows.flatMap(r => [r.costPct, r.mktPct])) * 1.12;
+
+  container.innerHTML = `
+    <div class="dumbbell-legend">
+      <span class="dumbbell-legend-item"><span class="dumbbell-swatch cost"></span>Cost %</span>
+      <span class="dumbbell-legend-item"><span class="dumbbell-swatch market"></span>Market Value %</span>
+    </div>
+    <div class="dumbbell-axis"><span>0%</span><span>${maxPct.toFixed(0)}%</span></div>
+    ${rows.map((r, i) => {
+      const delta     = r.mktPct - r.costPct;
+      const deltaCls   = delta >= 0 ? 'profit-positive' : 'profit-negative';
+      const deltaSign  = delta >= 0 ? '+' : '';
+      return `
+        <div class="dumbbell-row" data-row-index="${i}">
+          <div class="dumbbell-label" title="${escapeHtml(r.stockName)}">${escapeHtml(r.ticker)}</div>
+          <div class="dumbbell-track">
+            <div class="dumbbell-connector"></div>
+            <div class="dumbbell-dot cost"   title="Cost: ${r.costPct.toFixed(1)}%"></div>
+            <div class="dumbbell-dot market" title="Market Value: ${r.mktPct.toFixed(1)}%"></div>
+          </div>
+          <div class="dumbbell-values">${r.costPct.toFixed(1)}% <span class="dumbbell-arrow">→</span> ${r.mktPct.toFixed(1)}%</div>
+          <div class="dumbbell-delta ${deltaCls}">${deltaSign}${delta.toFixed(1)}pp</div>
+        </div>
+      `;
+    }).join('')}
+  `;
+
+  // Position dots/connector using measured pixel widths rather than CSS `%`,
+  // so the layout doesn't depend on the flex track's width being resolved
+  // before the browser lays out its absolutely-positioned children.
+  container.querySelectorAll('.dumbbell-row').forEach((row, i) => {
+    const r     = rows[i];
+    const track = row.querySelector('.dumbbell-track');
+    const width = track.getBoundingClientRect().width;
+    if (!width) return;
+
+    const costPx = (r.costPct / maxPct) * width;
+    const mktPx  = (r.mktPct  / maxPct) * width;
+
+    row.querySelector('.dumbbell-dot.cost').style.left   = `${costPx}px`;
+    row.querySelector('.dumbbell-dot.market').style.left = `${mktPx}px`;
+
+    const connector = row.querySelector('.dumbbell-connector');
+    connector.style.left  = `${Math.min(costPx, mktPx)}px`;
+    connector.style.width = `${Math.abs(mktPx - costPx)}px`;
   });
 }
 

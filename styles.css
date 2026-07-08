@@ -436,13 +436,30 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
 }
 
 /* ── Charts + Table Layout ────────────────────────────────────────────────── */
-.charts-and-table {
+.charts-and-table,
+.realized-summary-row {
   display: grid;
   grid-template-columns: 1fr 2fr;
   gap: 1.5rem;
 }
 @media (max-width: 1024px) {
-  .charts-and-table { grid-template-columns: 1fr; }
+  .charts-and-table, .realized-summary-row { grid-template-columns: 1fr; }
+}
+
+/* Realized tab: yearly summary + monthly chart surface above the detailed
+   allocation/transactions row, so the at-a-glance view comes first. */
+#portfolio-content.realized-mode .charts-and-table { order: 2; }
+#portfolio-content.realized-mode #realized-extra    { order: 1; }
+
+.compact-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.compact-chart { height: 300px; }
+@media (max-width: 1024px) {
+  .compact-chart { height: 260px; }
 }
 
 .section-title {
@@ -450,10 +467,6 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
   padding-bottom: 0.75rem;
   border-bottom: 1px solid var(--card-border);
 }
-.chart-section-divider {
-  margin-top: 2rem;
-}
-
 .canvas-wrapper {
   position: relative;
   height: 300px;
@@ -538,6 +551,100 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   background: rgba(139, 92, 246, 0.12);
   color: var(--accent-purple);
   border-color: rgba(139, 92, 246, 0.3);
+}
+
+/* ── Allocation Dumbbell Chart (Cost % vs Market Value % per holding) ────────── */
+.dumbbell-legend {
+  display: flex;
+  gap: 1.25rem;
+  margin-bottom: 1rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.dumbbell-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+.dumbbell-axis {
+  display: flex;
+  justify-content: space-between;
+  margin-left: 90px;
+  padding-bottom: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+.dumbbell-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.dumbbell-row:last-child { border-bottom: none; }
+.dumbbell-label {
+  width: 90px;
+  flex-shrink: 0;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dumbbell-track {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 8px;
+}
+.dumbbell-connector {
+  position: absolute;
+  top: 50%;
+  height: 2px;
+  background: rgba(255,255,255,0.18);
+  transform: translateY(-50%);
+}
+.dumbbell-dot {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 3px var(--card-bg);
+}
+.dumbbell-dot.cost   { background: var(--accent-cyan); }
+.dumbbell-dot.market { background: var(--accent-purple); }
+.dumbbell-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.dumbbell-swatch.cost   { background: var(--accent-cyan); }
+.dumbbell-swatch.market { background: var(--accent-purple); }
+.dumbbell-values {
+  width: 130px;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-align: right;
+}
+.dumbbell-arrow { opacity: 0.4; padding: 0 0.15rem; }
+.dumbbell-delta {
+  width: 56px;
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-align: right;
+}
+@media (max-width: 640px) {
+  .dumbbell-values { display: none; }
+  .dumbbell-label  { width: 60px; font-size: 0.78rem; }
+  .dumbbell-axis   { margin-left: 60px; }
 }
 
 /* ── History Tab ──────────────────────────────────────────────────────────── */

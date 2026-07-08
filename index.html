@@ -143,16 +143,19 @@
 
         <div class="charts-and-table">
           <section class="chart-container card">
-            <h2 class="section-title">Asset Allocation</h2>
-            <div class="canvas-wrapper">
-              <canvas id="allocationChart"></canvas>
+
+            <div id="allocation-dumbbell-section">
+              <h2 class="section-title">Cost % vs Market Value % by Holding</h2>
+              <div id="allocation-dumbbell" class="dumbbell-chart"></div>
             </div>
-            <div id="market-value-chart-section" class="hidden">
-              <h2 class="section-title chart-section-divider">Holdings by Market Value</h2>
+
+            <div id="realized-allocation-chart" class="hidden">
+              <h2 class="section-title">Asset Allocation</h2>
               <div class="canvas-wrapper">
-                <canvas id="marketValueChart"></canvas>
+                <canvas id="allocationChart"></canvas>
               </div>
             </div>
+
           </section>
 
           <section class="table-container card">
@@ -166,6 +169,7 @@
                     <th data-sort="category" class="sortable">Category</th>
                     <th data-sort="shares" class="sortable">Shares</th>
                     <th data-sort="costPrice" class="sortable">Cost/Share</th>
+                    <th data-sort="totalCost" class="sortable">Total Cost</th>
                     <th data-sort="mktPrice" class="sortable">Mkt Price</th>
                     <th data-sort="totalMktVal" class="sortable">Total Mkt Val</th>
                     <th data-sort="profit" class="sortable">Unrealized Profit</th>
@@ -195,6 +199,40 @@
 
             </div>
           </section>
+        </div>
+
+        <!-- ── Realized-only: Yearly Summary + Monthly Breakdown ────────── -->
+        <div id="realized-extra" class="hidden">
+          <div class="realized-summary-row">
+
+            <section class="table-container card compact-card">
+              <h2 class="section-title">Realized P&amp;L by Year</h2>
+              <div class="table-responsive">
+                <table id="table-yearly">
+                  <thead>
+                    <tr>
+                      <th>Year</th>
+                      <th>Total Realized P&amp;L</th>
+                      <th>Annual Dividends</th>
+                      <th>Closed Trade Profit</th>
+                    </tr>
+                  </thead>
+                  <tbody id="yearly-body"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="card history-card" id="monthly-chart-section">
+              <div class="history-header">
+                <h2 class="section-title">Monthly Breakdown</h2>
+                <div id="year-filter" class="ticker-filter"></div>
+              </div>
+              <div class="history-chart-wrapper compact-chart">
+                <canvas id="monthlyChart"></canvas>
+              </div>
+            </section>
+
+          </div>
         </div>
 
       </main>
