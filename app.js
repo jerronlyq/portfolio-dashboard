@@ -15,6 +15,8 @@ DBS,Bank,5000.00,100,6000.00,10.00,SGD`;
 const CHART_COLORS = ['#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#ec4899', '#6366f1', '#f97316'];
 
 let allocationChartInstance   = null;
+let holdingsHeatmapInstance   = null;
+let divergingChartInstance    = null;
 let historyChartInstance      = null;
 let monthlyChartInstance      = null;
 
@@ -206,8 +208,8 @@ async function fetchLivePrices(tickers) {
         if (res.ok) {
           const data = await res.json();
           if (data.c > 0) {
-            dictionary[ticker] = { price: data.c, name: nameOf(ticker), source: 'Finnhub' };
-            console.log(`[Finnhub] ${ticker}: ${data.c}`);
+            dictionary[ticker] = { price: data.c, changePct: data.dp, name: nameOf(ticker), source: 'Finnhub' };
+            console.log(`[Finnhub] ${ticker}: ${data.c} (${data.dp}%)`);
           }
         }
       } catch (e) {
@@ -226,11 +228,13 @@ async function fetchLivePrices(tickers) {
           const res = await fetchWithProxy(url);
           if (res) {
             const data = await res.json();
-            const meta  = data?.chart?.result?.[0]?.meta;
-            const price = meta?.regularMarketPrice;
+            const meta      = data?.chart?.result?.[0]?.meta;
+            const price     = meta?.regularMarketPrice;
+            const prevClose = meta?.previousClose ?? meta?.chartPreviousClose;
             if (price) {
-              dictionary[ticker] = { price, name: nameOf(ticker), source: 'Yahoo' };
-              console.log(`[Yahoo SGX] ✓ ${ticker}: ${price}`);
+              const changePct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : undefined;
+              dictionary[ticker] = { price, changePct, name: nameOf(ticker), source: 'Yahoo' };
+              console.log(`[Yahoo SGX] ✓ ${ticker}: ${price} (${changePct?.toFixed(2)}%)`);
             } else {
               console.warn(`[Yahoo SGX] ✗ ${ticker}: no price in response`, data);
             }
@@ -283,7 +287,7 @@ async function refreshPrices() {
     const profit       = totalMktVal - totalCostVal;
     const profitPct    = totalCostVal > 0 ? (profit / totalCostVal) * 100 : 0;
 
-    return { ...item, mktPrice, totalMktVal, profit, profitPct, source: dictData.source };
+    return { ...item, mktPrice, totalMktVal, profit, profitPct, dayChangePct: dictData.changePct, source: dictData.source };
   });
 
   updateLastRefreshed();
@@ -446,16 +450,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const refreshBtn = document.getElementById('refresh-btn');
   if (refreshBtn) refreshBtn.addEventListener('click', refreshPrices);
-
-  // ── Re-measure dumbbell chart on resize (pixel-based, not CSS %) ──────────
-
-  let resizeTimer = null;
-  window.addEventListener('resize', () => {
-    clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => {
-      if (currentTab === 'active') renderAllocationDumbbell(globalActiveData);
-    }, 150);
-  });
 
   // ── Date range buttons ────────────────────────────────────────────────────
 
@@ -670,10 +664,12 @@ async function processData(data, targetTab, showLoader = true) {
       let dataSource = dictData?.source || '';
       let mktPrice   = dictData?.price || 0;
       let stockName  = dictData?.name  || nameOf(cleanTicker);
+      let dayChangePct = dictData?.changePct;
 
       if (mktPrice === 0) {
         mktPrice   = parseNum(findValue(row, ['market price', 'current price', 'live price', 'googlefinance']));
         dataSource = 'Google';
+        dayChangePct = undefined;
       }
 
       if (rowCurrency === 'SGD' && currentSgdRate > 0) {
@@ -689,7 +685,7 @@ async function processData(data, targetTab, showLoader = true) {
       processedData.push({
         ticker: rawTicker, stockName,
         category: findValue(row, ['category', 'sector', 'type']) || 'Other',
-        shares, costPrice, totalCost: totalCostVal, mktPrice, totalMktVal, profit, profitPct,
+        shares, costPrice, totalCost: totalCostVal, mktPrice, totalMktVal, profit, profitPct, dayChangePct,
         source: dataSource, originalBase: rowCurrency
       });
     }
@@ -1010,6 +1006,7 @@ function renderDashboard() {
   if (isRealized) {
     if (realizedExtra) realizedExtra.classList.remove('hidden');
     portfolioContent?.classList.add('realized-mode');
+    portfolioContent?.classList.remove('active-mode');
     renderYearlySummaryTable(data);
     renderYearFilter(data);
     tableData = selectedRealizedYear === 'All'
@@ -1018,6 +1015,7 @@ function renderDashboard() {
     renderMonthlyChart(data);
   } else {
     if (realizedExtra) realizedExtra.classList.add('hidden');
+    portfolioContent?.classList.add('active-mode');
     portfolioContent?.classList.remove('realized-mode');
   }
 
@@ -1106,18 +1104,19 @@ function renderTables(data, isRealized) {
 // ── Allocation Chart ──────────────────────────────────────────────────────────
 
 function renderChart(data, isRealized) {
-  const dumbbellSection = document.getElementById('allocation-dumbbell-section');
+  const chartsSection   = document.getElementById('allocation-charts-section');
   const categorySection = document.getElementById('realized-allocation-chart');
 
   if (isRealized) {
-    if (dumbbellSection) dumbbellSection.classList.add('hidden');
+    if (chartsSection) chartsSection.classList.add('hidden');
     if (categorySection) categorySection.classList.remove('hidden');
     renderCategoryAllocationChart(data);
   } else {
     if (categorySection) categorySection.classList.add('hidden');
-    if (dumbbellSection) dumbbellSection.classList.remove('hidden');
+    if (chartsSection) chartsSection.classList.remove('hidden');
     if (allocationChartInstance) { allocationChartInstance.destroy(); allocationChartInstance = null; }
-    renderAllocationDumbbell(data);
+    renderHoldingsHeatmap(data);
+    renderDivergingChart(data);
   }
 }
 
@@ -1165,7 +1164,7 @@ function renderCategoryAllocationChart(data) {
   });
 }
 
-// ── Cost % vs Market Value % Dumbbell Chart (per holding) ────────────────────
+// ── Cost % Basis vs Market Value % (Treemaps + Diverging Bar) ────────────────
 
 function computeCostMarketBreakdown(data) {
   const totalCost = data.reduce((sum, item) => sum + (item.totalCost   || 0), 0);
@@ -1181,64 +1180,161 @@ function computeCostMarketBreakdown(data) {
     .sort((a, b) => b.mktPct - a.mktPct);
 }
 
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+function computeHoldingsHeatmap(data) {
+  const totalMkt = data.reduce((sum, item) => sum + (item.totalMktVal || 0), 0);
+
+  return data
+    .map(item => ({
+      ticker:    item.ticker,
+      stockName: item.stockName,
+      price:     item.mktPrice,
+      changePct: item.dayChangePct,
+      mktPct:    totalMkt > 0 ? (item.totalMktVal / totalMkt) * 100 : 0,
+    }))
+    .sort((a, b) => b.mktPct - a.mktPct);
 }
 
-function renderAllocationDumbbell(data) {
-  const container = document.getElementById('allocation-dumbbell');
-  if (!container) return;
+const hasChangePct = (v) => v !== null && v !== undefined && !isNaN(v);
 
-  if (data.length === 0) { container.innerHTML = ''; return; }
+// Finviz-style diverging scale: solid (not translucent) fills, muted near 0%,
+// increasingly saturated/bright toward ±5%+.
+function changeToColor(changePct) {
+  if (!hasChangePct(changePct) || changePct === 0) return '#3f4b5e';
+  const magnitude = Math.min(Math.abs(changePct), 5) / 5;
+  const lightness = 24 + magnitude * 22;
+  const hue       = changePct > 0 ? 152 : 2;
+  return `hsl(${hue}, 62%, ${lightness}%)`;
+}
 
-  const rows   = computeCostMarketBreakdown(data);
-  const maxPct = Math.max(1, ...rows.flatMap(r => [r.costPct, r.mktPct])) * 1.12;
+function formatChangePct(changePct) {
+  return hasChangePct(changePct) ? `${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%` : '–';
+}
 
-  container.innerHTML = `
-    <div class="dumbbell-legend">
-      <span class="dumbbell-legend-item"><span class="dumbbell-swatch cost"></span>Cost %</span>
-      <span class="dumbbell-legend-item"><span class="dumbbell-swatch market"></span>Market Value %</span>
-    </div>
-    <div class="dumbbell-axis"><span>0%</span><span>${maxPct.toFixed(0)}%</span></div>
-    ${rows.map((r, i) => {
-      const delta     = r.mktPct - r.costPct;
-      const deltaCls   = delta >= 0 ? 'profit-positive' : 'profit-negative';
-      const deltaSign  = delta >= 0 ? '+' : '';
-      return `
-        <div class="dumbbell-row" data-row-index="${i}">
-          <div class="dumbbell-label" title="${escapeHtml(r.stockName)}">${escapeHtml(r.ticker)}</div>
-          <div class="dumbbell-track">
-            <div class="dumbbell-connector"></div>
-            <div class="dumbbell-dot cost"   title="Cost: ${r.costPct.toFixed(1)}%"></div>
-            <div class="dumbbell-dot market" title="Market Value: ${r.mktPct.toFixed(1)}%"></div>
-          </div>
-          <div class="dumbbell-values">${r.costPct.toFixed(1)}% <span class="dumbbell-arrow">→</span> ${r.mktPct.toFixed(1)}%</div>
-          <div class="dumbbell-delta ${deltaCls}">${deltaSign}${delta.toFixed(1)}pp</div>
-        </div>
-      `;
-    }).join('')}
-  `;
+// With `groups: [...]` set, the treemap plugin wraps each leaf's original
+// object inside `_data.children[0]` (only the grouping key itself, e.g.
+// `ticker`, gets hoisted onto `_data` directly) — this unwraps it.
+const leafOf = (ctx) => ctx.raw._data.children?.[0] ?? ctx.raw._data;
 
-  // Position dots/connector using measured pixel widths rather than CSS `%`,
-  // so the layout doesn't depend on the flex track's width being resolved
-  // before the browser lays out its absolutely-positioned children.
-  container.querySelectorAll('.dumbbell-row').forEach((row, i) => {
-    const r     = rows[i];
-    const track = row.querySelector('.dumbbell-track');
-    const width = track.getBoundingClientRect().width;
-    if (!width) return;
+function renderHoldingsHeatmap(data) {
+  if (typeof Chart === 'undefined') return;
+  const canvas = document.getElementById('holdingsHeatmapChart');
+  if (!canvas) return;
 
-    const costPx = (r.costPct / maxPct) * width;
-    const mktPx  = (r.mktPct  / maxPct) * width;
+  if (holdingsHeatmapInstance) { holdingsHeatmapInstance.destroy(); holdingsHeatmapInstance = null; }
+  if (data.length === 0) return;
 
-    row.querySelector('.dumbbell-dot.cost').style.left   = `${costPx}px`;
-    row.querySelector('.dumbbell-dot.market').style.left = `${mktPx}px`;
+  const rows = computeHoldingsHeatmap(data);
 
-    const connector = row.querySelector('.dumbbell-connector');
-    connector.style.left  = `${Math.min(costPx, mktPx)}px`;
-    connector.style.width = `${Math.abs(mktPx - costPx)}px`;
+  holdingsHeatmapInstance = new Chart(canvas.getContext('2d'), {
+    type: 'treemap',
+    data: {
+      datasets: [{
+        tree: rows.map(r => ({
+          ticker: r.ticker, stockName: r.stockName, price: r.price, changePct: r.changePct, value: r.mktPct
+        })),
+        key: 'value',
+        groups: ['ticker'],
+        spacing: 2,
+        borderWidth: 2,
+        borderColor: '#0B0F16',
+        captions: { display: false },
+        backgroundColor: (ctx) => {
+          if (ctx.type !== 'data') return 'transparent';
+          return changeToColor(leafOf(ctx).changePct);
+        },
+        labels: {
+          display: true,
+          color: '#f8fafc',
+          font: (ctx) => {
+            if (ctx.type !== 'data') return { size: 11, weight: '700' };
+            const box = Math.min(ctx.raw.w || 0, ctx.raw.h || 0);
+            return { size: Math.max(11, Math.min(22, box / 4.5)), weight: '700', family: "'Outfit', sans-serif" };
+          },
+          formatter: (ctx) => {
+            if (ctx.type !== 'data') return;
+            const d = leafOf(ctx);
+            const w = ctx.raw.w || 0, h = ctx.raw.h || 0;
+            const lines = [d.ticker];
+            if (h > 32) lines.push(formatChangePct(d.changePct));
+            if (h > 52 && w > 70) lines.push(formatCurrency(d.price));
+            return lines;
+          }
+        }
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#fff', bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
+          callbacks: {
+            title: (items) => items[0] ? leafOf(items[0]).stockName : '',
+            label: (ctx) => {
+              const d = leafOf(ctx);
+              return [
+                `Price: ${formatCurrency(d.price)}`,
+                `Day Change: ${formatChangePct(d.changePct)}`,
+                `Portfolio Weight: ${ctx.raw.v.toFixed(1)}%`
+              ];
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+// Population-pyramid-style diverging bar: Cost % extends left, Market Value % extends right.
+function renderDivergingChart(data) {
+  if (typeof Chart === 'undefined') return;
+  const wrapper = document.getElementById('diverging-wrapper');
+  const canvas  = document.getElementById('divergingChart');
+  if (!canvas) return;
+
+  if (divergingChartInstance) { divergingChartInstance.destroy(); divergingChartInstance = null; }
+  if (data.length === 0) return;
+
+  // Reversed so the highest-weight holding renders at the top of the (bottom-up) horizontal bar axis.
+  const rows = computeCostMarketBreakdown(data).slice().reverse();
+
+  if (wrapper) wrapper.style.height = `${Math.max(220, rows.length * 34 + 60)}px`;
+
+  divergingChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: rows.map(r => r.ticker),
+      datasets: [
+        { label: 'Cost %',         data: rows.map(r => -r.costPct), backgroundColor: '#06b6d4', borderRadius: 4, maxBarThickness: 22 },
+        { label: 'Market Value %', data: rows.map(r => r.mktPct),   backgroundColor: '#8b5cf6', borderRadius: 4, maxBarThickness: 22 },
+      ]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'y', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', padding: 20 } },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#fff', bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
+          callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${Math.abs(ctx.raw).toFixed(1)}%` }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color: 'rgba(255,255,255,0.05)' },
+          ticks: { color: '#94a3b8', callback: (val) => `${Math.abs(val).toFixed(0)}%` }
+        },
+        y: {
+          grid: { display: false },
+          ticks: { color: '#94a3b8' }
+        }
+      }
+    }
   });
 }
 

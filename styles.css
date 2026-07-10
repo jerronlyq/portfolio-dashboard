@@ -451,6 +451,11 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
 #portfolio-content.realized-mode .charts-and-table { order: 2; }
 #portfolio-content.realized-mode #realized-extra    { order: 1; }
 
+/* Active tab: allocation charts (treemaps + diverging bar) need more room
+   than the 1fr sidebar column gives them, so stack full-width above the
+   holdings table instead of sitting side-by-side with it. */
+#portfolio-content.active-mode .charts-and-table { grid-template-columns: 1fr; }
+
 .compact-card {
   display: flex;
   flex-direction: column;
@@ -553,99 +558,11 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   border-color: rgba(139, 92, 246, 0.3);
 }
 
-/* ── Allocation Dumbbell Chart (Cost % vs Market Value % per holding) ────────── */
-.dumbbell-legend {
-  display: flex;
-  gap: 1.25rem;
-  margin-bottom: 1rem;
-  font-size: 0.8rem;
-  color: var(--text-secondary);
-}
-.dumbbell-legend-item {
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-.dumbbell-axis {
-  display: flex;
-  justify-content: space-between;
-  margin-left: 90px;
-  padding-bottom: 0.5rem;
-  font-size: 0.7rem;
-  color: var(--text-secondary);
-  opacity: 0.6;
-}
-.dumbbell-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.55rem 0;
-  border-bottom: 1px solid rgba(255,255,255,0.03);
-}
-.dumbbell-row:last-child { border-bottom: none; }
-.dumbbell-label {
-  width: 90px;
-  flex-shrink: 0;
-  font-weight: 600;
-  font-size: 0.85rem;
-  color: var(--text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.dumbbell-track {
-  position: relative;
-  flex: 1;
-  height: 16px;
-  background: rgba(255,255,255,0.03);
-  border-radius: 8px;
-}
-.dumbbell-connector {
-  position: absolute;
-  top: 50%;
-  height: 2px;
-  background: rgba(255,255,255,0.18);
-  transform: translateY(-50%);
-}
-.dumbbell-dot {
-  position: absolute;
-  top: 50%;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  box-shadow: 0 0 0 3px var(--card-bg);
-}
-.dumbbell-dot.cost   { background: var(--accent-cyan); }
-.dumbbell-dot.market { background: var(--accent-purple); }
-.dumbbell-swatch {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-}
-.dumbbell-swatch.cost   { background: var(--accent-cyan); }
-.dumbbell-swatch.market { background: var(--accent-purple); }
-.dumbbell-values {
-  width: 130px;
-  flex-shrink: 0;
-  font-size: 0.75rem;
-  color: var(--text-secondary);
-  text-align: right;
-}
-.dumbbell-arrow { opacity: 0.4; padding: 0 0.15rem; }
-.dumbbell-delta {
-  width: 56px;
-  flex-shrink: 0;
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-align: right;
-}
-@media (max-width: 640px) {
-  .dumbbell-values { display: none; }
-  .dumbbell-label  { width: 60px; font-size: 0.78rem; }
-  .dumbbell-axis   { margin-left: 60px; }
-}
+/* ── Allocation Charts: Holdings Heatmap + Cost % vs Market Value % Diverging Bar ── */
+.chart-section-divider { margin-top: 2rem; }
+
+.treemap-wrapper-single { height: 340px; margin-bottom: 1.5rem; }
+.diverging-wrapper { width: 100%; }
 
 /* ── History Tab ──────────────────────────────────────────────────────────── */
 .history-card { margin-bottom: 0; }
@@ -660,6 +577,35 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   gap: 0.75rem;
 }
 .history-header .section-title { margin-bottom: 0; border: none; padding: 0; }
+
+.heatmap-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.heatmap-header .heatmap-title { margin-bottom: 0; border: none; padding: 0; }
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+.heatmap-legend-bar {
+  width: 120px;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(to right,
+    hsl(2, 62%, 46%) 0%,
+    hsl(2, 62%, 35%) 25%,
+    #3f4b5e 50%,
+    hsl(152, 62%, 35%) 75%,
+    hsl(152, 62%, 46%) 100%
+  );
+}
 
 /* Date range buttons */
 .date-range-group {
@@ -857,6 +803,9 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 
   /* ── History tab ───────────────────────────────────────────────── */
   .history-header { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+
+  /* ── Holdings heatmap ──────────────────────────────────────────── */
+  .heatmap-header { flex-direction: column; align-items: flex-start; gap: 0.6rem; }
   .history-chart-wrapper { height: 280px; }
   .ticker-select { min-width: 160px; font-size: 0.8rem; }
   .history-metrics { gap: 1rem; padding: 0.65rem 0 1rem; }
