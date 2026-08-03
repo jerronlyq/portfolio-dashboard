@@ -13,6 +13,7 @@
   --accent-green:      #10b981;
   --accent-red:        #ef4444;
   --accent-orange:     #f59e0b;
+  --accent-pink:       #ec4899;
 
   --font-main:  'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --transition: all 0.25s ease;
@@ -261,7 +262,8 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
   gap: 0.75rem;
 }
 
-.source-row input[type="text"] {
+.source-row input[type="text"],
+.source-row input[type="password"] {
   flex: 1;
   padding: 0.6rem 0.9rem;
   border-radius: 8px;
@@ -273,7 +275,8 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
   transition: var(--transition);
   width: auto;
 }
-.source-row input[type="text"]:focus {
+.source-row input[type="text"]:focus,
+.source-row input[type="password"]:focus {
   outline: none;
   border-color: var(--accent-cyan);
   box-shadow: 0 0 0 2px var(--accent-cyan-glow);
@@ -288,6 +291,7 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
 .source-row-icon.purple { color: var(--accent-purple); }
 .source-row-icon.green  { color: var(--accent-green);  }
 .source-row-icon.orange { color: var(--accent-orange); }
+.source-row-icon.pink   { color: var(--accent-pink);   }
 
 .sync-btn {
   padding: 0.6rem 1.1rem;
@@ -304,6 +308,7 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
 .sync-btn.purple { background: rgba(139,92,246,0.1);  border: 1px solid var(--accent-purple); color: var(--accent-purple); }
 .sync-btn.green  { background: rgba(16,185,129,0.1);  border: 1px solid var(--accent-green);  color: var(--accent-green);  }
 .sync-btn.orange { background: rgba(245,158,11,0.1);  border: 1px solid var(--accent-orange); color: var(--accent-orange); }
+.sync-btn.pink   { background: rgba(236,72,153,0.1);  border: 1px solid var(--accent-pink);   color: var(--accent-pink);   }
 
 .sources-footer {
   display: flex;
@@ -343,6 +348,7 @@ h3 { font-size: 0.9rem;  font-weight: 400; color: var(--text-secondary); text-tr
 .source-pill.pill-purple { background: rgba(139,92,246,0.12); color: var(--accent-purple); border-color: rgba(139,92,246,0.25); }
 .source-pill.pill-green  { background: rgba(16,185,129,0.12); color: var(--accent-green);  border-color: rgba(16,185,129,0.25);  }
 .source-pill.pill-orange { background: rgba(245,158,11,0.12); color: var(--accent-orange); border-color: rgba(245,158,11,0.25);  }
+.source-pill.pill-pink   { background: rgba(236,72,153,0.12); color: var(--accent-pink);   border-color: rgba(236,72,153,0.25);  }
 
 /* ── Tab Navigation ───────────────────────────────────────────────────────── */
 .tab-navigation {
@@ -556,6 +562,138 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   background: rgba(139, 92, 246, 0.12);
   color: var(--accent-purple);
   border-color: rgba(139, 92, 246, 0.3);
+}
+
+/* ── Table Header + Log Purchase Modal ────────────────────────────────────── */
+.table-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+.table-header .table-header-title { margin-bottom: 0; border: none; padding: 0; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.7);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1rem;
+}
+
+.modal {
+  width: 100%;
+  max-width: 440px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.modal:hover { transform: none; }
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1.25rem;
+}
+.modal-title { margin-bottom: 0; border: none; padding: 0; }
+.modal-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 1.4rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.15rem 0.4rem;
+  transition: var(--transition);
+}
+.modal-close:hover { color: var(--text-primary); }
+
+.modal-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--accent-red);
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem;
+  font-size: 0.82rem;
+  margin-bottom: 1rem;
+}
+
+.modal-field { margin-bottom: 1rem; }
+.modal-checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.modal-checkbox-field input[type="checkbox"] {
+  width: auto;
+  accent-color: var(--accent-cyan);
+  cursor: pointer;
+}
+.modal-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.85rem;
+}
+.modal-field label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.4rem;
+}
+.modal-field input,
+.modal-field select {
+  width: 100%;
+  padding: 0.6rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-primary);
+  font-family: var(--font-main);
+  font-size: 0.88rem;
+  transition: var(--transition);
+}
+.modal-field input:focus,
+.modal-field select:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 0 2px var(--accent-cyan-glow);
+}
+.modal-field select { appearance: none; -webkit-appearance: none; }
+.modal-field select option { background: #1e293b; color: var(--text-primary); }
+
+.modal-preview {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem;
+  margin-bottom: 1.25rem;
+}
+.modal-preview strong { color: var(--text-primary); }
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 1.25rem;
+}
+.modal-actions .sync-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  filter: none;
 }
 
 /* ── Allocation Charts: Holdings Heatmap + Cost % vs Market Value % Diverging Bar ── */
@@ -806,6 +944,10 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 
   /* ── Holdings heatmap ──────────────────────────────────────────── */
   .heatmap-header { flex-direction: column; align-items: flex-start; gap: 0.6rem; }
+
+  /* ── Log Purchase modal ────────────────────────────────────────── */
+  .table-header { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+  .modal-field-row { grid-template-columns: 1fr; gap: 0.4rem; }
   .history-chart-wrapper { height: 280px; }
   .ticker-select { min-width: 160px; font-size: 0.8rem; }
   .history-metrics { gap: 1rem; padding: 0.65rem 0 1rem; }

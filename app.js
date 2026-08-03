@@ -14,6 +14,13 @@ DBS,Bank,5000.00,100,6000.00,10.00,SGD`;
 // Per-ticker line colours — shared between chips and chart datasets
 const CHART_COLORS = ['#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#ec4899', '#6366f1', '#f97316'];
 
+// Fixed tab names within the single Google Sheet — must match the
+// ACTIVE_SHEET / REALIZED_SHEET / SNAPSHOT_SHEET constants in
+// google-apps-script-write-handler.gs exactly.
+const SHEET_ACTIVE_TAB   = 'Active Holdings';
+const SHEET_REALIZED_TAB = 'Realized History';
+const SHEET_SNAPSHOT_TAB = 'Snapshots';
+
 let allocationChartInstance   = null;
 let holdingsHeatmapInstance   = null;
 let divergingChartInstance    = null;
@@ -47,6 +54,28 @@ const findValue = (row, keys) => {
 };
 
 const nameOf = (ticker) => TICKER_NAME_MAP[ticker] || ticker;
+
+// Accepts either a bare Spreadsheet ID or a full Sheets URL and returns just
+// the ID, so users can paste whichever they have on hand.
+const extractSheetId = (input) => {
+  const trimmed = String(input || '').trim();
+  const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return match ? match[1] : trimmed;
+};
+
+// Google's gviz endpoint takes a sheet NAME (not a gid), so all three tabs'
+// CSV URLs can be derived from one Spreadsheet ID + the fixed tab names
+// above — no per-tab "Publish to web" step needed, just Sheet-level "Anyone
+// with the link can view" sharing.
+const buildSheetCsvUrl = (sheetId, tabName) =>
+  `https://docs.google.com/spreadsheets/d/${encodeURIComponent(sheetId)}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
+
+// Default sort for the Realized History table: newest transaction first.
+// Applied wherever globalRealizedData is (re)populated — a manual column
+// header click (see the sort listener further down) overrides this until
+// the next reload/optimistic update re-establishes it.
+const sortRealizedByDateDesc = (arr) =>
+  arr.sort((a, b) => (new Date(b.date).getTime() || 0) - (new Date(a.date).getTime() || 0));
 
 const toDisplayCurrency = (v) => activeCurrency === 'SGD' ? v * currentSgdRate : v;
 
@@ -98,15 +127,19 @@ function updateLastRefreshed() {
 
 function updateSourcePills() {
   [
-    { id: 'pill-active',      key: 'saved_csv_url',        cls: 'pill-cyan'   },
-    { id: 'pill-realized',    key: 'saved_realized_url',   cls: 'pill-purple' },
-    { id: 'pill-snapshots',   key: 'saved_snapshot_url',   cls: 'pill-green'  },
+    { id: 'pill-sheet',       key: 'saved_sheet_id',       cls: 'pill-cyan'   },
     { id: 'pill-finnhub',     key: 'finnhub_api_key',      cls: 'pill-orange' },
   ].forEach(({ id, key, cls }) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.className = `source-pill ${localStorage.getItem(key) ? cls : ''}`;
   });
+
+  const writePill = document.getElementById('pill-write');
+  if (writePill) {
+    const configured = localStorage.getItem('saved_write_url') && localStorage.getItem('write_token');
+    writePill.className = `source-pill ${configured ? 'pill-pink' : ''}`;
+  }
 }
 
 // ── CORS Proxy Chain (SGX Yahoo fallback only) ───────────────────────────────
@@ -376,24 +409,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderHistoryTab();
   });
 
-  // ── Load buttons ──────────────────────────────────────────────────────────
+  // ── Sheet sync (single Sheet ID drives all three tabs) ────────────────────
 
-  document.getElementById('load-btn').addEventListener('click', () => {
-    const url = document.getElementById('csv-url').value.trim();
-    if (url) { localStorage.setItem('saved_csv_url', url); updateSourcePills(); fetchRemoteCSV(url, 'active'); }
-    else alert("Please paste the Active Holdings CSV URL.");
-  });
+  document.getElementById('save-sheet-btn').addEventListener('click', () => {
+    const raw = document.getElementById('sheet-id').value.trim();
+    if (!raw) { alert("Please paste your Google Sheet link or ID."); return; }
 
-  document.getElementById('load-realized-btn').addEventListener('click', () => {
-    const url = document.getElementById('realized-url').value.trim();
-    if (url) { localStorage.setItem('saved_realized_url', url); updateSourcePills(); fetchRemoteCSV(url, 'realized'); }
-    else alert("Please paste the Realized History CSV URL.");
-  });
-
-  document.getElementById('load-snapshot-btn').addEventListener('click', () => {
-    const url = document.getElementById('snapshot-url').value.trim();
-    if (url) { localStorage.setItem('saved_snapshot_url', url); updateSourcePills(); fetchRemoteCSV(url, 'snapshot'); }
-    else alert("Please paste the Snapshots CSV URL.");
+    const sheetId = extractSheetId(raw);
+    localStorage.setItem('saved_sheet_id', sheetId);
+    updateSourcePills();
+    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_ACTIVE_TAB),   'active');
+    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_REALIZED_TAB), 'realized');
+    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_SNAPSHOT_TAB), 'snapshot');
   });
 
   // ── Offline file upload ───────────────────────────────────────────────────
@@ -431,12 +458,55 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
+  // ── Log Purchase write-back config (Apps Script Web App URL + token) ──────
+
+  const writeUrlInput   = document.getElementById('write-url');
+  const writeTokenInput = document.getElementById('write-token');
+  const saveWriteUrlBtn   = document.getElementById('save-write-url-btn');
+  const saveWriteTokenBtn = document.getElementById('save-write-token-btn');
+
+  if (writeUrlInput && localStorage.getItem('saved_write_url')) {
+    writeUrlInput.value = localStorage.getItem('saved_write_url');
+  }
+  if (writeTokenInput && localStorage.getItem('write_token')) {
+    writeTokenInput.value = localStorage.getItem('write_token');
+  }
+
+  saveWriteUrlBtn?.addEventListener('click', () => {
+    const url = writeUrlInput?.value?.trim();
+    if (url) {
+      localStorage.setItem('saved_write_url', url);
+      updateSourcePills();
+      saveWriteUrlBtn.textContent = '✓ Saved';
+      setTimeout(() => { saveWriteUrlBtn.textContent = 'Save URL'; }, 1500);
+    } else {
+      localStorage.removeItem('saved_write_url');
+      updateSourcePills();
+    }
+  });
+
+  saveWriteTokenBtn?.addEventListener('click', () => {
+    const token = writeTokenInput?.value?.trim();
+    if (token) {
+      localStorage.setItem('write_token', token);
+      updateSourcePills();
+      saveWriteTokenBtn.textContent = '✓ Saved';
+      setTimeout(() => { saveWriteTokenBtn.textContent = 'Save Token'; }, 1500);
+    } else {
+      localStorage.removeItem('write_token');
+      updateSourcePills();
+    }
+  });
+
   // ── Clear all ────────────────────────────────────────────────────────────
 
   document.getElementById('clear-btn').addEventListener('click', () => {
-    ['saved_csv_url', 'saved_realized_url', 'saved_snapshot_url', 'finnhub_api_key'].forEach(k => localStorage.removeItem(k));
-    ['csv-url', 'realized-url', 'snapshot-url'].forEach(id => { document.getElementById(id).value = ''; });
+    ['saved_sheet_id', 'finnhub_api_key', 'saved_write_url', 'write_token']
+      .forEach(k => localStorage.removeItem(k));
+    document.getElementById('sheet-id').value = '';
     if (finnhubKeyInput) finnhubKeyInput.value = '';
+    if (writeUrlInput) writeUrlInput.value = '';
+    if (writeTokenInput) writeTokenInput.value = '';
     globalSnapshotData = null;
     selectedHistoryTickers.clear();
     updateSourcePills();
@@ -450,6 +520,69 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   const refreshBtn = document.getElementById('refresh-btn');
   if (refreshBtn) refreshBtn.addEventListener('click', refreshPrices);
+
+  // ── Log Purchase modal ──────────────────────────────────────────────────────
+
+  document.getElementById('log-purchase-btn')?.addEventListener('click', openPurchaseModal);
+  document.getElementById('purchase-modal-close')?.addEventListener('click', closePurchaseModal);
+  document.getElementById('purchase-cancel-btn')?.addEventListener('click', closePurchaseModal);
+
+  document.getElementById('purchase-modal-backdrop')?.addEventListener('click', (e) => {
+    if (e.target.id === 'purchase-modal-backdrop') closePurchaseModal();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    const backdrop = document.getElementById('purchase-modal-backdrop');
+    if (e.key === 'Escape' && backdrop && !backdrop.classList.contains('hidden')) closePurchaseModal();
+  });
+
+  document.getElementById('purchase-form')?.addEventListener('submit', handlePurchaseSubmit);
+
+  ['purchase-shares', 'purchase-total-cost', 'purchase-commission', 'purchase-currency'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', updatePurchasePreview);
+  });
+
+  document.getElementById('purchase-ticker')?.addEventListener('blur', () => {
+    const tickerInput = document.getElementById('purchase-ticker');
+    const ticker = tickerInput.value.trim().toUpperCase();
+    tickerInput.value = ticker;
+
+    const existing = globalActiveData.find(i => i.ticker.toUpperCase() === ticker);
+    if (existing) {
+      const currencySelect = document.getElementById('purchase-currency');
+      if (currencySelect) currencySelect.value = existing.originalBase;
+
+      const categorySelect = document.getElementById('purchase-category');
+      if (categorySelect && [...categorySelect.options].some(o => o.value === existing.category)) {
+        categorySelect.value = existing.category;
+      }
+    }
+    updatePurchasePreview();
+  });
+
+  // ── Log Sale modal ────────────────────────────────────────────────────────
+
+  document.getElementById('log-sale-btn')?.addEventListener('click', openSaleModal);
+  document.getElementById('sale-modal-close')?.addEventListener('click', closeSaleModal);
+  document.getElementById('sale-cancel-btn')?.addEventListener('click', closeSaleModal);
+
+  document.getElementById('sale-modal-backdrop')?.addEventListener('click', (e) => {
+    if (e.target.id === 'sale-modal-backdrop') closeSaleModal();
+  });
+
+  document.addEventListener('keydown', (e) => {
+    const backdrop = document.getElementById('sale-modal-backdrop');
+    if (e.key === 'Escape' && backdrop && !backdrop.classList.contains('hidden')) closeSaleModal();
+  });
+
+  document.getElementById('sale-form')?.addEventListener('submit', handleSaleSubmit);
+
+  document.getElementById('sale-ticker')?.addEventListener('change', updateSaleCurrencyAndHint);
+  document.getElementById('sale-is-dividend')?.addEventListener('change', toggleDividendMode);
+
+  ['sale-shares', 'sale-total-proceeds', 'sale-commission', 'sale-date'].forEach(id => {
+    document.getElementById(id)?.addEventListener('input', updateSalePreview);
+  });
 
   // ── Date range buttons ────────────────────────────────────────────────────
 
@@ -501,27 +634,16 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ── Initial data load ─────────────────────────────────────────────────────
 
-  const savedActive   = localStorage.getItem('saved_csv_url');
-  const savedRealized = localStorage.getItem('saved_realized_url');
-  const savedSnapshot = localStorage.getItem('saved_snapshot_url');
+  const savedSheetId = localStorage.getItem('saved_sheet_id');
 
-  if (savedActive) {
-    document.getElementById('csv-url').value = savedActive;
-    fetchRemoteCSV(savedActive, 'active');
+  if (savedSheetId) {
+    document.getElementById('sheet-id').value = savedSheetId;
+    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_ACTIVE_TAB),   'active');
+    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_REALIZED_TAB), 'realized');
+    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_SNAPSHOT_TAB), 'snapshot');
   } else {
-    processData(Papa.parse(DEFAULT_CSV_DATA, { header: true, skipEmptyLines: true }).data, 'active', false);
-  }
-
-  if (savedRealized) {
-    document.getElementById('realized-url').value = savedRealized;
-    fetchRemoteCSV(savedRealized, 'realized');
-  } else {
+    processData(Papa.parse(DEFAULT_CSV_DATA,      { header: true, skipEmptyLines: true }).data, 'active',   false);
     processData(Papa.parse(DEFAULT_REALIZED_DATA, { header: true, skipEmptyLines: true }).data, 'realized', false);
-  }
-
-  if (savedSnapshot) {
-    document.getElementById('snapshot-url').value = savedSnapshot;
-    fetchRemoteCSV(savedSnapshot, 'snapshot');
   }
 });
 
@@ -751,12 +873,564 @@ async function processData(data, targetTab, showLoader = true) {
       });
     }
 
-    globalRealizedData = processedData;
+    globalRealizedData = sortRealizedByDateDesc(processedData);
     selectedRealizedYear = 'All';
     if (currentTab === 'realized') renderDashboard();
   }
 
   if (loader) loader.classList.add('hidden');
+}
+
+// ── Log Purchase (write-back to Google Sheets) ───────────────────────────────
+
+function openPurchaseModal() {
+  const backdrop = document.getElementById('purchase-modal-backdrop');
+  if (!backdrop) return;
+
+  document.getElementById('purchase-form')?.reset();
+  document.getElementById('purchase-commission').value = 0;
+  hidePurchaseError();
+  populatePurchaseCategorySelect();
+  updatePurchasePreview();
+
+  backdrop.classList.remove('hidden');
+  document.getElementById('purchase-ticker')?.focus();
+}
+
+function closePurchaseModal() {
+  document.getElementById('purchase-modal-backdrop')?.classList.add('hidden');
+}
+
+function hidePurchaseError() {
+  const box = document.getElementById('purchase-modal-error');
+  if (!box) return;
+  box.classList.add('hidden');
+  box.textContent = '';
+}
+
+function showPurchaseError(message) {
+  const box = document.getElementById('purchase-modal-error');
+  if (!box) return;
+  box.textContent = message;
+  box.classList.remove('hidden');
+}
+
+function populatePurchaseCategorySelect() {
+  const select = document.getElementById('purchase-category');
+  if (!select) return;
+
+  const categories = [...new Set(globalActiveData.map(i => i.category))]
+    .filter(cat => cat && cat !== 'Other')
+    .sort();
+
+  select.innerHTML = '';
+  categories.forEach(cat => {
+    const opt = document.createElement('option');
+    opt.value = cat;
+    opt.textContent = cat;
+    select.appendChild(opt);
+  });
+
+  const otherOpt = document.createElement('option');
+  otherOpt.value = 'Other';
+  otherOpt.textContent = 'Other';
+  select.appendChild(otherOpt);
+}
+
+// Effective cost/share preview — formatted in the purchase's OWN selected
+// currency, independent of the dashboard's USD/SGD display toggle.
+function updatePurchasePreview() {
+  const preview = document.getElementById('purchase-preview');
+  if (!preview) return;
+
+  const shares     = parseFloat(document.getElementById('purchase-shares').value) || 0;
+  const totalCost  = parseFloat(document.getElementById('purchase-total-cost').value) || 0;
+  const commission = parseFloat(document.getElementById('purchase-commission').value) || 0;
+  const currency   = document.getElementById('purchase-currency').value;
+
+  const combined = totalCost + commission;
+  if (shares <= 0 || combined <= 0) {
+    preview.textContent = 'Enter shares and total cost to see the effective cost/share.';
+    return;
+  }
+
+  const effective = combined / shares;
+  const formatted = new Intl.NumberFormat('en-US', {
+    style: 'currency', currency, minimumFractionDigits: 2
+  }).format(effective);
+  preview.innerHTML = `Effective Cost/Share (incl. fees): <strong>${formatted}</strong>`;
+}
+
+async function handlePurchaseSubmit(e) {
+  e.preventDefault();
+  hidePurchaseError();
+
+  const ticker      = document.getElementById('purchase-ticker').value.trim().toUpperCase();
+  const shares      = parseFloat(document.getElementById('purchase-shares').value);
+  const totalCost   = parseFloat(document.getElementById('purchase-total-cost').value);
+  const commission  = parseFloat(document.getElementById('purchase-commission').value) || 0;
+  const currency    = document.getElementById('purchase-currency').value;
+  const category    = document.getElementById('purchase-category').value;
+
+  if (!ticker || !(shares > 0) || !(totalCost > 0)) {
+    showPurchaseError('Enter a ticker, a positive share count, and a positive total cost.');
+    return;
+  }
+
+  const writeUrl   = localStorage.getItem('saved_write_url');
+  const writeToken = localStorage.getItem('write_token');
+  if (!writeUrl || !writeToken) {
+    showPurchaseError('Set the Write Endpoint URL and Write Token in Data Sources first.');
+    return;
+  }
+
+  const submitBtn = document.getElementById('purchase-submit-btn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Logging...';
+
+  const totalCostWithFees = totalCost + commission;
+
+  try {
+    const res = await fetch(writeUrl, {
+      method: 'POST',
+      // text/plain avoids a CORS preflight OPTIONS request, which Apps
+      // Script Web Apps don't handle — the server parses this as JSON itself.
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        token: writeToken, ticker, shares, totalCost: totalCostWithFees, currency, category
+      })
+    });
+
+    let body;
+    try {
+      body = await res.json();
+    } catch (parseErr) {
+      showPurchaseError('Google Sheets is temporarily unavailable — try again in a minute.');
+      return;
+    }
+
+    if (!body.success) {
+      const message = body.error === 'unauthorized'
+        ? 'Unauthorized — check the write token in Data Sources.'
+        : (body.error || 'Something went wrong recording this purchase.');
+      showPurchaseError(message);
+      return;
+    }
+
+    applyOptimisticPurchase(ticker, category, currency, body.shares, body.totalCost);
+    closePurchaseModal();
+    alert(`${ticker} recorded to Google Sheet. Local view updated — Sync Active later to confirm against the published CSV.`);
+
+  } catch (err) {
+    showPurchaseError("Couldn't reach Google Sheets — check your connection and try again.");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Log Purchase';
+  }
+}
+
+// Reconstructs raw-CSV-shaped rows from the current in-memory holdings and
+// re-runs them through processData() — reuses the existing live-price fetch
+// and enrichment logic instead of duplicating it, and keeps this local view
+// in sync with what the server just wrote (server response is authoritative
+// for the changed ticker's shares/totalCost, in its original currency).
+function applyOptimisticPurchase(ticker, category, currency, serverShares, serverTotalCost) {
+  const rawRows = globalActiveData.map(item => ({
+    Ticker: item.ticker,
+    Category: item.category,
+    'Total Cost Price': item.originalBase === 'SGD' && currentSgdRate > 0
+      ? item.totalCost * currentSgdRate
+      : item.totalCost,
+    Shares: item.shares,
+    Currency: item.originalBase,
+  }));
+
+  const idx = rawRows.findIndex(r => r.Ticker.toUpperCase() === ticker.toUpperCase());
+  if (idx >= 0) {
+    rawRows[idx] = {
+      ...rawRows[idx],
+      'Total Cost Price': serverTotalCost,
+      Shares: serverShares,
+      Category: category,
+      Currency: currency,
+    };
+  } else {
+    rawRows.push({
+      Ticker: ticker, Category: category, 'Total Cost Price': serverTotalCost,
+      Shares: serverShares, Currency: currency,
+    });
+  }
+
+  processData(rawRows, 'active');
+}
+
+// ── Log Sale (write-back to Google Sheets) ───────────────────────────────────
+
+function openSaleModal() {
+  const backdrop = document.getElementById('sale-modal-backdrop');
+  if (!backdrop) return;
+
+  if (globalActiveData.length === 0) {
+    alert('No active holdings to sell.');
+    return;
+  }
+
+  document.getElementById('sale-form')?.reset();
+  document.getElementById('sale-commission').value = 0;
+  document.getElementById('sale-date').value = new Date().toISOString().split('T')[0];
+  hideSaleError();
+  populateSaleTickerSelect();
+  updateSaleCurrencyAndHint();
+  toggleDividendMode(); // resets fields/labels to match the reset (unchecked) checkbox state
+
+  backdrop.classList.remove('hidden');
+  document.getElementById('sale-ticker')?.focus();
+}
+
+// Swaps the modal between "Sale" and "Dividend" shape: dividends don't
+// involve shares sold or commission (they're cash income, not a disposal),
+// so those fields hide and the amount/date fields relabel accordingly.
+function toggleDividendMode() {
+  const isDividend = document.getElementById('sale-is-dividend').checked;
+
+  document.getElementById('sale-shares-field')?.classList.toggle('hidden', isDividend);
+  document.getElementById('sale-commission-field')?.classList.toggle('hidden', isDividend);
+
+  // A hidden-but-required field silently blocks native form submission
+  // (the browser can't focus it to report validity), so the required flag
+  // has to travel with the hidden state, not just visibility.
+  const sharesInput = document.getElementById('sale-shares');
+  if (sharesInput) sharesInput.required = !isDividend;
+
+  const proceedsLabel = document.getElementById('sale-total-proceeds-label');
+  if (proceedsLabel) proceedsLabel.textContent = isDividend ? 'Dividend Amount' : 'Total Sell Proceeds (pre-fee)';
+
+  const dateLabel = document.getElementById('sale-date-label');
+  if (dateLabel) dateLabel.textContent = isDividend ? 'Payout Date' : 'Sale Date';
+
+  const title = document.getElementById('sale-modal-title');
+  if (title) title.textContent = isDividend ? 'Log Dividend' : 'Log Sale';
+
+  const submitBtn = document.getElementById('sale-submit-btn');
+  if (submitBtn) submitBtn.textContent = isDividend ? 'Log Dividend' : 'Log Sale';
+
+  updateSalePreview();
+}
+
+function closeSaleModal() {
+  document.getElementById('sale-modal-backdrop')?.classList.add('hidden');
+}
+
+function hideSaleError() {
+  const box = document.getElementById('sale-modal-error');
+  if (!box) return;
+  box.classList.add('hidden');
+  box.textContent = '';
+}
+
+function showSaleError(message) {
+  const box = document.getElementById('sale-modal-error');
+  if (!box) return;
+  box.textContent = message;
+  box.classList.remove('hidden');
+}
+
+function populateSaleTickerSelect() {
+  const select = document.getElementById('sale-ticker');
+  if (!select) return;
+
+  const holdings = [...globalActiveData].sort((a, b) => a.ticker.localeCompare(b.ticker));
+
+  select.innerHTML = '';
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  placeholder.textContent = 'Select a holding…';
+  select.appendChild(placeholder);
+
+  holdings.forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = item.ticker;
+    const sharesLabel = item.shares.toLocaleString(undefined, { maximumFractionDigits: 4 });
+    opt.textContent = `${item.ticker} — ${sharesLabel} shares held`;
+    select.appendChild(opt);
+  });
+}
+
+function updateSaleCurrencyAndHint() {
+  const select        = document.getElementById('sale-ticker');
+  const currencyField = document.getElementById('sale-currency');
+  const sharesField    = document.getElementById('sale-shares');
+  if (!select || !currencyField || !sharesField) return;
+
+  const ticker  = select.value.trim().toUpperCase();
+  const holding = globalActiveData.find(i => i.ticker.toUpperCase() === ticker);
+
+  if (holding) {
+    currencyField.value = holding.originalBase;
+    sharesField.max = holding.shares;
+  } else {
+    currencyField.value = '';
+    sharesField.removeAttribute('max');
+  }
+
+  updateSalePreview();
+}
+
+// Estimated realized P&L preview — formatted in the SOLD HOLDING'S OWN
+// currency, independent of the dashboard's USD/SGD display toggle, mirroring
+// updatePurchasePreview(). Cost basis is reconstructed back into the
+// holding's original currency since globalActiveData stores USD-normalized
+// values (see applyOptimisticPurchase's identical reconstruction).
+function updateSalePreview() {
+  const preview = document.getElementById('sale-preview');
+  if (!preview) return;
+
+  const ticker  = document.getElementById('sale-ticker').value.trim().toUpperCase();
+  const holding = globalActiveData.find(i => i.ticker.toUpperCase() === ticker);
+
+  if (document.getElementById('sale-is-dividend').checked) {
+    const amount = parseFloat(document.getElementById('sale-total-proceeds').value) || 0;
+    const date   = document.getElementById('sale-date').value;
+    if (!holding || amount <= 0) {
+      preview.textContent = 'Select a holding and enter the dividend amount to see a preview.';
+      return;
+    }
+    const formatted = new Intl.NumberFormat('en-US', {
+      style: 'currency', currency: holding.originalBase, minimumFractionDigits: 2
+    }).format(amount);
+
+    // Yield on cost — cost basis reconstructed into the holding's own
+    // currency the same way updateSalePreview's Sale branch does, since
+    // costPrice is stored USD-normalized in globalActiveData.
+    const costPriceOriginal = holding.originalBase === 'SGD' && currentSgdRate > 0
+      ? holding.costPrice * currentSgdRate
+      : holding.costPrice;
+    const costBasisOriginal = costPriceOriginal * holding.shares;
+    const yieldPct = costBasisOriginal > 0 ? (amount / costBasisOriginal) * 100 : 0;
+
+    preview.innerHTML = `Dividend: <strong class="profit-positive">${formatted}</strong> · Yield on Cost: <strong class="profit-positive">${yieldPct.toFixed(2)}%</strong>${date ? ` on ${date}` : ''}`;
+    return;
+  }
+
+  const shares        = parseFloat(document.getElementById('sale-shares').value) || 0;
+  const totalProceeds = parseFloat(document.getElementById('sale-total-proceeds').value) || 0;
+  const commission    = parseFloat(document.getElementById('sale-commission').value) || 0;
+
+  if (!holding || shares <= 0 || totalProceeds <= 0) {
+    preview.textContent = 'Select a holding and enter shares/proceeds to see the realized P&L.';
+    return;
+  }
+
+  const costPriceOriginal = holding.originalBase === 'SGD' && currentSgdRate > 0
+    ? holding.costPrice * currentSgdRate
+    : holding.costPrice;
+
+  const costBasisRemoved = costPriceOriginal * shares;
+  const profit    = totalProceeds - costBasisRemoved - commission;
+  const profitPct = costBasisRemoved > 0 ? (profit / costBasisRemoved) * 100 : 0;
+
+  const cls  = profit >= 0 ? 'profit-positive' : 'profit-negative';
+  const sign = profit >= 0 ? '+' : '';
+  const formatted = new Intl.NumberFormat('en-US', {
+    style: 'currency', currency: holding.originalBase, minimumFractionDigits: 2
+  }).format(profit);
+
+  const EPS = 1e-6;
+  const oversell = shares > holding.shares + EPS
+    ? ` <span class="profit-negative">— exceeds ${holding.shares} shares held</span>`
+    : '';
+
+  preview.innerHTML = `Estimated Realized P&L: <strong class="${cls}">${sign}${formatted} (${sign}${profitPct.toFixed(2)}%)</strong>${oversell}`;
+}
+
+async function handleSaleSubmit(e) {
+  e.preventDefault();
+  hideSaleError();
+
+  const isDividend = document.getElementById('sale-is-dividend').checked;
+  const ticker      = document.getElementById('sale-ticker').value.trim().toUpperCase();
+  const date        = document.getElementById('sale-date').value || new Date().toISOString().split('T')[0];
+
+  const holding = globalActiveData.find(i => i.ticker.toUpperCase() === ticker);
+  if (!holding) {
+    showSaleError('Select a valid holding.');
+    return;
+  }
+
+  const currency = holding.originalBase;
+  const category = holding.category;
+
+  let payload;
+  if (isDividend) {
+    const amount = parseFloat(document.getElementById('sale-total-proceeds').value);
+    if (!(amount > 0)) {
+      showSaleError('Enter a positive dividend amount.');
+      return;
+    }
+    payload = { action: 'dividend', ticker, amount, currency, category, date };
+  } else {
+    const shares     = parseFloat(document.getElementById('sale-shares').value);
+    const totalSell  = parseFloat(document.getElementById('sale-total-proceeds').value);
+    const commission = parseFloat(document.getElementById('sale-commission').value) || 0;
+
+    if (!(shares > 0) || !(totalSell > 0)) {
+      showSaleError('Enter a positive share count and a positive total sell proceeds.');
+      return;
+    }
+
+    const EPS = 1e-6;
+    if (shares > holding.shares + EPS) {
+      showSaleError(`Cannot sell ${shares} shares — only ${holding.shares} held.`);
+      return;
+    }
+
+    payload = { action: 'sell', ticker, shares, totalSell, commission, currency, category, date };
+  }
+
+  const writeUrl   = localStorage.getItem('saved_write_url');
+  const writeToken = localStorage.getItem('write_token');
+  if (!writeUrl || !writeToken) {
+    showSaleError('Set the Write Endpoint URL and Write Token in Data Sources first.');
+    return;
+  }
+  payload.token = writeToken;
+
+  const submitBtn = document.getElementById('sale-submit-btn');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Logging...';
+
+  try {
+    const res = await fetch(writeUrl, {
+      method: 'POST',
+      // text/plain avoids a CORS preflight OPTIONS request, which Apps
+      // Script Web Apps don't handle — the server parses this as JSON itself.
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload)
+    });
+
+    let body;
+    try {
+      body = await res.json();
+    } catch (parseErr) {
+      showSaleError('Google Sheets is temporarily unavailable — try again in a minute.');
+      return;
+    }
+
+    if (!body.success) {
+      const message = body.error === 'unauthorized'
+        ? 'Unauthorized — check the write token in Data Sources.'
+        : (body.error || `Something went wrong recording this ${isDividend ? 'dividend' : 'sale'}.`);
+      showSaleError(message);
+      return;
+    }
+
+    if (isDividend) {
+      applyOptimisticDividend(ticker, category, currency, date, body);
+      closeSaleModal();
+      alert(`${ticker} dividend recorded to Google Sheet.`);
+    } else {
+      applyOptimisticSale(ticker, category, currency, date, body);
+      closeSaleModal();
+      alert(`${ticker} sale recorded to Google Sheet. Local view updated — Sync Active/Realized later to confirm against the published CSVs.`);
+    }
+
+  } catch (err) {
+    showSaleError("Couldn't reach Google Sheets — check your connection and try again.");
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = isDividend ? 'Log Dividend' : 'Log Sale';
+  }
+}
+
+// Mirrors applyOptimisticPurchase's rawRows reconstruction for the Active
+// Holdings side, plus pushes a matching entry into globalRealizedData so the
+// Realized History tab reflects the closed trade without a CSV resync. The
+// realized profit/profitPct formula below intentionally matches the CSV
+// fallback formula in processData() (profit = totalSell - totalBuyCost -
+// commission) so a manually-logged sale and a later CSV-resynced view of the
+// same trade agree.
+function applyOptimisticSale(ticker, category, currency, date, serverResult) {
+  const rawRows = globalActiveData.map(item => ({
+    Ticker: item.ticker,
+    Category: item.category,
+    'Total Cost Price': item.originalBase === 'SGD' && currentSgdRate > 0
+      ? item.totalCost * currentSgdRate
+      : item.totalCost,
+    Shares: item.shares,
+    Currency: item.originalBase,
+  }));
+
+  const idx = rawRows.findIndex(r => r.Ticker.toUpperCase() === ticker.toUpperCase());
+  if (idx >= 0) {
+    if (serverResult.action === 'deleted') {
+      rawRows.splice(idx, 1);
+    } else {
+      rawRows[idx] = {
+        ...rawRows[idx],
+        'Total Cost Price': serverResult.remainingCost,
+        Shares: serverResult.remainingShares,
+      };
+    }
+  }
+
+  processData(rawRows, 'active');
+
+  const sharesSold   = serverResult.sharesSold;
+  const totalSell    = serverResult.totalSell;
+  const commission   = serverResult.commission;
+  const totalBuyCost = serverResult.costBasisRemoved;
+
+  const profit    = totalSell - totalBuyCost - commission;
+  const profitPct = totalBuyCost > 0 ? (profit / totalBuyCost) * 100 : 0;
+  const sellPrice = sharesSold > 0 ? totalSell / sharesSold : 0;
+
+  // USD-normalize exactly like processData()'s realized branch — profitPct
+  // is a ratio and is deliberately NOT divided by currentSgdRate.
+  let profitUSD = profit, totalBuyCostUSD = totalBuyCost, totalSellUSD = totalSell,
+      sellPriceUSD = sellPrice, commissionUSD = commission;
+  if (currency === 'SGD' && currentSgdRate > 0) {
+    profitUSD       /= currentSgdRate;
+    totalBuyCostUSD /= currentSgdRate;
+    totalSellUSD    /= currentSgdRate;
+    sellPriceUSD    /= currentSgdRate;
+    commissionUSD   /= currentSgdRate;
+  }
+
+  globalRealizedData.push({
+    date, ticker, stockName: nameOf(normalizeTicker(ticker, currency)),
+    category, type: 'Trade', shares: sharesSold,
+    profit: profitUSD, profitPct,
+    totalCost: totalBuyCostUSD, totalSell: totalSellUSD,
+    sellPrice: sellPriceUSD, commission: commissionUSD,
+    originalBase: currency,
+  });
+  sortRealizedByDateDesc(globalRealizedData);
+
+  if (currentTab === 'realized') renderDashboard();
+}
+
+// Dividends are cash income, not a disposal — they never touch Active
+// Holdings (no share count or cost basis change), so unlike
+// applyOptimisticSale this only ever appends to globalRealizedData.
+function applyOptimisticDividend(ticker, category, currency, date, serverResult) {
+  const amountUSD = currency === 'SGD' && currentSgdRate > 0
+    ? serverResult.amount / currentSgdRate
+    : serverResult.amount;
+
+  globalRealizedData.push({
+    date, ticker, stockName: nameOf(normalizeTicker(ticker, currency)),
+    category, type: 'Dividend', shares: 0,
+    // profitPct is a ratio (yield on cost), never currency-converted —
+    // authoritative value computed server-side from the sheet's cost basis.
+    profit: amountUSD, profitPct: serverResult.yieldPct || 0,
+    totalCost: 0, totalSell: 0, sellPrice: 0, commission: 0,
+    originalBase: currency,
+  });
+  sortRealizedByDateDesc(globalRealizedData);
+
+  if (currentTab === 'realized') renderDashboard();
 }
 
 // ── Realized: Yearly Summary + Monthly Breakdown ─────────────────────────────
@@ -1029,6 +1703,11 @@ function renderTables(data, isRealized) {
   const tableActive   = document.getElementById('table-active');
   const tableRealized = document.getElementById('table-realized');
   const headTitle     = document.getElementById('table-head-title');
+  const logPurchaseBtn = document.getElementById('log-purchase-btn');
+  const logSaleBtn      = document.getElementById('log-sale-btn');
+
+  if (logPurchaseBtn) logPurchaseBtn.classList.toggle('hidden', isRealized);
+  if (logSaleBtn)     logSaleBtn.classList.toggle('hidden', isRealized);
 
   if (isRealized) {
     tableActive.classList.add('hidden');

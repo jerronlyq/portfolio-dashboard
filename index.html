@@ -60,10 +60,9 @@
             <span>Data Sources</span>
           </div>
           <div class="sources-toggle-right">
-            <span class="source-pill" id="pill-active">Active</span>
-            <span class="source-pill" id="pill-realized">Realized</span>
-            <span class="source-pill" id="pill-snapshots">Snapshots</span>
+            <span class="source-pill" id="pill-sheet">Sheet</span>
             <span class="source-pill" id="pill-finnhub">Finnhub</span>
+            <span class="source-pill" id="pill-write">Write</span>
             <i data-feather="chevron-down" id="sources-chevron" class="sources-chevron"></i>
           </div>
         </button>
@@ -72,27 +71,27 @@
           <div class="sources-inputs">
 
             <div class="source-row">
-              <i data-feather="activity" class="source-row-icon cyan"></i>
-              <input type="text" id="csv-url" placeholder="Google Sheet CSV — Active Holdings...">
-              <button id="load-btn" class="sync-btn cyan">Sync Active</button>
-            </div>
-
-            <div class="source-row">
-              <i data-feather="archive" class="source-row-icon purple"></i>
-              <input type="text" id="realized-url" placeholder="Google Sheet CSV — Realized History...">
-              <button id="load-realized-btn" class="sync-btn purple">Sync History</button>
-            </div>
-
-            <div class="source-row">
-              <i data-feather="trending-up" class="source-row-icon green"></i>
-              <input type="text" id="snapshot-url" placeholder="Google Sheet CSV — Snapshots (Daily History)...">
-              <button id="load-snapshot-btn" class="sync-btn green">Sync Snapshots</button>
+              <i data-feather="database" class="source-row-icon cyan"></i>
+              <input type="text" id="sheet-id" placeholder="Google Sheet link or ID — shared as &quot;Anyone with the link can view&quot;">
+              <button id="save-sheet-btn" class="sync-btn cyan">Sync Sheet</button>
             </div>
 
             <div class="source-row">
               <i data-feather="key" class="source-row-icon orange"></i>
               <input type="password" id="finnhub-key" placeholder="Finnhub API Key — free at finnhub.io (US stocks, ETFs, crypto)">
               <button id="save-finnhub-btn" class="sync-btn orange">Save Key</button>
+            </div>
+
+            <div class="source-row">
+              <i data-feather="upload" class="source-row-icon pink"></i>
+              <input type="text" id="write-url" placeholder="Apps Script Web App URL — for Log Purchase">
+              <button id="save-write-url-btn" class="sync-btn pink">Save URL</button>
+            </div>
+
+            <div class="source-row">
+              <i data-feather="lock" class="source-row-icon pink"></i>
+              <input type="password" id="write-token" placeholder="Write Token — shared secret for Log Purchase">
+              <button id="save-write-token-btn" class="sync-btn pink">Save Token</button>
             </div>
 
             <div class="sources-footer">
@@ -175,7 +174,11 @@
           </section>
 
           <section class="table-container card">
-            <h2 class="section-title" id="table-head-title">Holdings Overview</h2>
+            <div class="table-header">
+              <h2 class="section-title table-header-title" id="table-head-title">Holdings Overview</h2>
+              <button id="log-purchase-btn" class="sync-btn green">+ Log Purchase</button>
+              <button id="log-sale-btn" class="sync-btn orange">+ Log Sale</button>
+            </div>
             <div class="table-responsive">
 
               <table id="table-active">
@@ -290,6 +293,124 @@
   <div id="loading" class="hidden">
     <div class="spinner"></div>
     <p>Parsing CSV Data...</p>
+  </div>
+
+  <!-- Log Purchase modal -->
+  <div id="purchase-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal card">
+      <div class="modal-header">
+        <h2 class="section-title modal-title">Log Purchase</h2>
+        <button id="purchase-modal-close" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+
+      <div id="purchase-modal-error" class="modal-error hidden"></div>
+
+      <form id="purchase-form">
+        <div class="modal-field">
+          <label for="purchase-ticker">Ticker</label>
+          <input type="text" id="purchase-ticker" placeholder="e.g. AAPL" required>
+        </div>
+
+        <div class="modal-field-row">
+          <div class="modal-field">
+            <label for="purchase-shares">Shares</label>
+            <input type="number" id="purchase-shares" min="0" step="any" placeholder="0" required>
+          </div>
+          <div class="modal-field">
+            <label for="purchase-currency">Currency</label>
+            <select id="purchase-currency">
+              <option value="USD">USD</option>
+              <option value="SGD">SGD</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="modal-field-row">
+          <div class="modal-field">
+            <label for="purchase-total-cost">Total Cost (pre-fee)</label>
+            <input type="number" id="purchase-total-cost" min="0" step="any" placeholder="0.00" required>
+          </div>
+          <div class="modal-field">
+            <label for="purchase-commission">Commission Fees</label>
+            <input type="number" id="purchase-commission" min="0" step="any" placeholder="0.00" value="0">
+          </div>
+        </div>
+
+        <div class="modal-field">
+          <label for="purchase-category">Category</label>
+          <select id="purchase-category">
+            <option value="Other">Other</option>
+          </select>
+        </div>
+
+        <div class="modal-preview" id="purchase-preview"></div>
+
+        <div class="modal-actions">
+          <button type="button" id="purchase-cancel-btn" class="text-btn">Cancel</button>
+          <button type="submit" id="purchase-submit-btn" class="sync-btn green">Log Purchase</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Log Sale modal -->
+  <div id="sale-modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal card">
+      <div class="modal-header">
+        <h2 class="section-title modal-title" id="sale-modal-title">Log Sale</h2>
+        <button id="sale-modal-close" class="modal-close" aria-label="Close">&times;</button>
+      </div>
+
+      <div id="sale-modal-error" class="modal-error hidden"></div>
+
+      <form id="sale-form">
+        <div class="modal-field">
+          <label for="sale-ticker">Ticker</label>
+          <select id="sale-ticker" required>
+            <option value="" disabled selected>Select a holding&hellip;</option>
+          </select>
+        </div>
+
+        <label class="modal-checkbox-field">
+          <input type="checkbox" id="sale-is-dividend">
+          This is a dividend payout
+        </label>
+
+        <div class="modal-field-row">
+          <div class="modal-field" id="sale-shares-field">
+            <label for="sale-shares">Shares Sold</label>
+            <input type="number" id="sale-shares" min="0" step="any" placeholder="0" required>
+          </div>
+          <div class="modal-field">
+            <label for="sale-currency">Currency</label>
+            <input type="text" id="sale-currency" readonly disabled placeholder="&mdash;">
+          </div>
+        </div>
+
+        <div class="modal-field-row">
+          <div class="modal-field">
+            <label for="sale-total-proceeds" id="sale-total-proceeds-label">Total Sell Proceeds (pre-fee)</label>
+            <input type="number" id="sale-total-proceeds" min="0" step="any" placeholder="0.00" required>
+          </div>
+          <div class="modal-field" id="sale-commission-field">
+            <label for="sale-commission">Commission Fees</label>
+            <input type="number" id="sale-commission" min="0" step="any" placeholder="0.00" value="0">
+          </div>
+        </div>
+
+        <div class="modal-field">
+          <label for="sale-date" id="sale-date-label">Sale Date</label>
+          <input type="date" id="sale-date">
+        </div>
+
+        <div class="modal-preview" id="sale-preview"></div>
+
+        <div class="modal-actions">
+          <button type="button" id="sale-cancel-btn" class="text-btn">Cancel</button>
+          <button type="submit" id="sale-submit-btn" class="sync-btn orange">Log Sale</button>
+        </div>
+      </form>
+    </div>
   </div>
 
   <script src="app.js"></script>
