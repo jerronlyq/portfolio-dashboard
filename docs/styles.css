@@ -564,6 +564,34 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   border-color: rgba(139, 92, 246, 0.3);
 }
 
+.rec-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.22rem 0.65rem;
+  border-radius: 20px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+.rec-badge.strong-buy,
+.rec-badge.buy {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--accent-green);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+.rec-badge.hold {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-secondary);
+  border-color: rgba(148, 163, 184, 0.3);
+}
+.rec-badge.strong-sell,
+.rec-badge.sell {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-red);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
 /* ── Table Header + Log Purchase Modal ────────────────────────────────────── */
 .table-header {
   display: flex;
@@ -833,6 +861,30 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 .metric-positive { color: var(--accent-green) !important; }
 .metric-negative { color: var(--accent-red)   !important; }
 
+/* Analyst consensus — deliberately its own layout rather than reusing
+   .history-metrics (built for exactly 3 flex-wrapped items): the consensus
+   badge gets its own row, and the 5 count buckets sit in a grid that stays
+   readable down to narrow phone widths instead of wrapping into cramped,
+   unevenly-sized flex items. */
+.insights-recommendation {
+  padding: 0.85rem 0 1.25rem;
+  border-bottom: 1px solid var(--card-border);
+}
+.insights-consensus-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.insights-rec-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.75rem 1rem;
+}
+@media (max-width: 768px) {
+  .insights-rec-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
 /* History line chart */
 .history-chart-wrapper {
   position: relative;
@@ -854,6 +906,76 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 .empty-icon  { width: 44px; height: 44px; opacity: 0.2; color: var(--accent-green); }
 .empty-title { font-size: 1.05rem; color: var(--text-primary); opacity: 0.7; }
 .empty-sub   { font-size: 0.82rem; color: var(--text-secondary); opacity: 0.55; line-height: 1.6; max-width: 420px; }
+
+/* ── Insights Tab ─────────────────────────────────────────────────────────── */
+#insights-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+.insights-news-subheading {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 0.75rem;
+}
+#insights-news-top-wrap {
+  padding-bottom: 1rem;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--card-border);
+}
+#insights-news-top-wrap .insights-news-subheading { color: var(--accent-orange); }
+
+.insights-news-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  max-height: 640px;
+  overflow-y: auto;
+}
+
+.insights-news-item {
+  display: flex;
+  gap: 0.9rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--card-border);
+}
+.insights-news-item:last-child { border-bottom: none; padding-bottom: 0; }
+
+.insights-news-thumb {
+  width: 72px;
+  height: 72px;
+  flex-shrink: 0;
+  object-fit: cover;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+}
+
+.insights-news-body { min-width: 0; }
+
+.insights-news-headline {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-decoration: none;
+  line-height: 1.4;
+  margin-bottom: 0.35rem;
+}
+.insights-news-headline:hover { color: var(--accent-cyan); text-decoration: underline; }
+
+.insights-news-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
 
 /* ── Loading Overlay ──────────────────────────────────────────────────────── */
 .hidden { display: none !important; }

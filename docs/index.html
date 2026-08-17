@@ -116,6 +116,9 @@
       <button class="nav-tab" id="tab-history">
         <i data-feather="bar-chart-2"></i> Portfolio History
       </button>
+      <button class="nav-tab" id="tab-insights">
+        <i data-feather="rss"></i> Insights
+      </button>
     </div>
 
     <!-- ── Active & Realized Content ─────────────────────────────────────── -->
@@ -284,6 +287,55 @@
         <p class="empty-title">No snapshot data yet.</p>
         <p class="empty-sub">Open Data Sources above, paste your Snapshots CSV URL, and click Sync Snapshots.</p>
       </div>
+
+    </div>
+
+    <!-- ── Insights Content (news / analyst consensus / EPS) ────────────────── -->
+    <div id="insights-content" class="hidden">
+
+      <!-- No-API-key empty state -->
+      <div id="insights-empty" class="card history-empty hidden">
+        <i data-feather="key" class="empty-icon"></i>
+        <p class="empty-title">Finnhub API key required.</p>
+        <p class="empty-sub">Open Data Sources above and save your Finnhub API key to see news, analyst recommendations, and EPS data for your holdings.</p>
+      </div>
+
+      <!-- Controls: ticker filter + refresh, analyst consensus, EPS chart -->
+      <section class="card history-card hidden" id="insights-controls-section">
+        <div class="history-header">
+          <h2 class="section-title">Ticker</h2>
+          <div id="insights-ticker-filter" class="ticker-filter"></div>
+          <button id="insights-refresh-btn" class="refresh-btn">↻ Refresh</button>
+        </div>
+
+        <div id="insights-recommendation" class="insights-recommendation hidden"></div>
+        <p id="insights-recommendation-empty" class="empty-sub"></p>
+
+        <div id="insights-eps-section" class="hidden">
+          <h2 class="section-title chart-section-divider">EPS Actual vs. Estimate — Last 4 Quarters</h2>
+          <div class="history-chart-wrapper compact-chart">
+            <canvas id="epsChart"></canvas>
+          </div>
+        </div>
+        <p id="insights-eps-empty" class="empty-sub"></p>
+      </section>
+
+      <!-- Recent company news -->
+      <section class="card history-card hidden" id="insights-news-section">
+        <div class="history-header">
+          <h2 class="section-title" id="insights-news-title">Recent Company News — All My Holdings</h2>
+        </div>
+        <p id="insights-news-loading" class="empty-sub hidden">Loading news…</p>
+
+        <div id="insights-news-top-wrap" class="hidden">
+          <h3 class="insights-news-subheading">Top Stories</h3>
+          <ul id="insights-news-top-list" class="insights-news-list"></ul>
+        </div>
+
+        <h3 class="insights-news-subheading hidden" id="insights-news-more-heading">More News</h3>
+        <ul id="insights-news-list" class="insights-news-list"></ul>
+        <p id="insights-news-empty" class="empty-sub hidden">No recent news found for this selection.</p>
+      </section>
 
     </div>
 

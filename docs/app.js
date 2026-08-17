@@ -26,6 +26,7 @@ let holdingsHeatmapInstance   = null;
 let divergingChartInstance    = null;
 let historyChartInstance      = null;
 let monthlyChartInstance      = null;
+let epsChartInstance          = null;
 
 // ── Global State ──────────────────────────────────────────────────────────────
 let activeCurrency        = 'USD';
@@ -40,11 +41,47 @@ let activeHistoryRange    = 'All';
 let selectedHistoryTickers = new Set();
 let selectedRealizedYear  = 'All';
 
+// Insights tab: session-only cache (no localStorage) keyed by normalized
+// ticker, so revisiting a ticker or switching tabs costs zero extra API
+// calls until the user explicitly hits Refresh.
+let insightsCache = { news: {}, recommendation: {}, earnings: {} };
+let selectedInsightsTicker = null; // null = "All My Holdings"
+const NEWS_LOOKBACK_DAYS = 30;
+const TOP_STORIES_LIMIT  = 5;
+
+// Finnhub aggregates from a very wide range of publishers (confirmed:
+// everything from Reuters down to small regional outlets) with no
+// importance/relevance score of its own — this curated list of recognized
+// major financial/business outlets is the "source reputation" heuristic
+// used to surface a Top Stories section. Matched as a case-insensitive
+// substring against the article's `source` field.
+const MAJOR_NEWS_SOURCES = [
+  'reuters', 'bloomberg', 'cnbc', 'wall street journal', 'wsj', 'marketwatch',
+  'associated press', 'yahoo finance', 'financial times', "barron's", 'barrons',
+  'forbes', 'business insider', 'motley fool', "investor's business daily",
+  'zacks', 'benzinga', 'seeking alpha', 'new york times', 'axios',
+  'fox business', 'npr', 'the economist',
+];
+const isMajorSource = (source) => {
+  const s = String(source || '').toLowerCase();
+  return MAJOR_NEWS_SOURCES.some(name => s.includes(name));
+};
+
 const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 // ── Module-Level Utilities ────────────────────────────────────────────────────
 
 const parseNum = (val) => parseFloat(String(val).replace(/[^0-9.-]+/g, '')) || 0;
+
+// Unlike CSV/user-entered fields elsewhere in this file, Finnhub news
+// headlines/sources/URLs are third-party external content interpolated
+// into innerHTML — escape before rendering to avoid an XSS vector.
+const escapeHtml = (str) => String(str || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
 
 const findValue = (row, keys) => {
   const match = Object.keys(row).find(k =>
@@ -328,6 +365,131 @@ async function refreshPrices() {
   if (currentTab === 'active') renderDashboard();
 }
 
+// ── Insights: Finnhub News / Recommendations / Earnings ─────────────────────
+//
+// Unlike fetchLivePrices() (which has a Yahoo fallback for .SI tickers),
+// these three endpoints are Finnhub-only with no fallback source, and
+// Finnhub's free tier is US-coverage — non-US tickers will just come back
+// empty, which the render functions already treat as a normal empty state
+// rather than an error.
+
+async function fetchTickerNews(ticker, { force = false } = {}) {
+  if (!force && insightsCache.news[ticker]) return insightsCache.news[ticker];
+
+  const finnhubKey = localStorage.getItem('finnhub_api_key') || '';
+  if (!finnhubKey) return [];
+
+  const to   = new Date();
+  const from = new Date(to.getTime() - NEWS_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+  const fmt  = (d) => d.toISOString().split('T')[0];
+
+  let result = [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(
+      `https://finnhub.io/api/v1/company-news?symbol=${toFinnhubSymbol(ticker)}&from=${fmt(from)}&to=${fmt(to)}&token=${finnhubKey}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) result = data;
+    }
+  } catch (e) {
+    console.warn(`[Finnhub news] failed for ${ticker}:`, e);
+  }
+
+  insightsCache.news[ticker] = result;
+  return result;
+}
+
+async function fetchAllHoldingsNews({ force = false } = {}) {
+  const tickers = [...new Set(globalActiveData.map(item => normalizeTicker(item.ticker, item.originalBase)))];
+  const lists = await Promise.all(tickers.map(t => fetchTickerNews(t, { force })));
+
+  const merged = [];
+  tickers.forEach((ticker, i) => {
+    lists[i].forEach(item => merged.push({ ...item, _ticker: ticker }));
+  });
+  merged.sort((a, b) => b.datetime - a.datetime);
+  return merged;
+}
+
+async function fetchTickerRecommendation(ticker, { force = false } = {}) {
+  if (!force && insightsCache.recommendation[ticker] !== undefined) return insightsCache.recommendation[ticker];
+
+  const finnhubKey = localStorage.getItem('finnhub_api_key') || '';
+  if (!finnhubKey) return null;
+
+  let result = null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(
+      `https://finnhub.io/api/v1/stock/recommendation?symbol=${toFinnhubSymbol(ticker)}&token=${finnhubKey}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) result = data[0];
+    }
+  } catch (e) {
+    console.warn(`[Finnhub recommendation] failed for ${ticker}:`, e);
+  }
+
+  insightsCache.recommendation[ticker] = result;
+  return result;
+}
+
+async function fetchTickerEarnings(ticker, { force = false } = {}) {
+  if (!force && insightsCache.earnings[ticker]) return insightsCache.earnings[ticker];
+
+  const finnhubKey = localStorage.getItem('finnhub_api_key') || '';
+  if (!finnhubKey) return [];
+
+  let result = [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(
+      `https://finnhub.io/api/v1/stock/earnings?symbol=${toFinnhubSymbol(ticker)}&token=${finnhubKey}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      // Finnhub returns most-recent-quarter first; reverse to chronological
+      // order so it can be handed straight to Chart.js as left-to-right labels.
+      if (Array.isArray(data)) result = [...data].reverse();
+    }
+  } catch (e) {
+    console.warn(`[Finnhub earnings] failed for ${ticker}:`, e);
+  }
+
+  insightsCache.earnings[ticker] = result;
+  return result;
+}
+
+// Single entry point for tab-open / ticker-change / Refresh-click. News for
+// all held tickers is always (re)loaded; recommendation + earnings are only
+// fetched for selectedInsightsTicker if one is actually selected, keeping
+// call volume to ~1/ticker for news plus 2 extra calls only when a specific
+// ticker is inspected.
+async function loadInsightsData({ force = false } = {}) {
+  if (!localStorage.getItem('finnhub_api_key')) return;
+
+  await fetchAllHoldingsNews({ force });
+
+  if (selectedInsightsTicker) {
+    await Promise.all([
+      fetchTickerRecommendation(selectedInsightsTicker, { force }),
+      fetchTickerEarnings(selectedInsightsTicker, { force }),
+    ]);
+  }
+}
+
 // ── Application Init ──────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -381,14 +543,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Tab switching ─────────────────────────────────────────────────────────
 
   function activateTab(tabId) {
-    ['tab-active', 'tab-realized', 'tab-history'].forEach(id => {
+    ['tab-active', 'tab-realized', 'tab-history', 'tab-insights'].forEach(id => {
       document.getElementById(id).classList.remove('active');
     });
     document.getElementById(tabId).classList.add('active');
 
-    const isHistory = tabId === 'tab-history';
-    document.getElementById('portfolio-content').classList.toggle('hidden', isHistory);
-    document.getElementById('history-content').classList.toggle('hidden', !isHistory);
+    document.getElementById('portfolio-content').classList.toggle('hidden', tabId !== 'tab-active' && tabId !== 'tab-realized');
+    document.getElementById('history-content').classList.toggle('hidden', tabId !== 'tab-history');
+    document.getElementById('insights-content').classList.toggle('hidden', tabId !== 'tab-insights');
   }
 
   document.getElementById('tab-active').addEventListener('click', () => {
@@ -407,6 +569,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     currentTab = 'history';
     activateTab('tab-history');
     renderHistoryTab();
+  });
+
+  document.getElementById('tab-insights').addEventListener('click', () => {
+    currentTab = 'insights';
+    activateTab('tab-insights');
+    renderInsightsTab();
   });
 
   // ── Sheet sync (single Sheet ID drives all three tabs) ────────────────────
@@ -509,17 +677,30 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (writeTokenInput) writeTokenInput.value = '';
     globalSnapshotData = null;
     selectedHistoryTickers.clear();
+    insightsCache = { news: {}, recommendation: {}, earnings: {} };
+    selectedInsightsTicker = null;
     updateSourcePills();
     alert('All links cleared. Resetting to demo data...');
     processData(Papa.parse(DEFAULT_CSV_DATA,      { header: true, skipEmptyLines: true }).data, 'active');
     processData(Papa.parse(DEFAULT_REALIZED_DATA, { header: true, skipEmptyLines: true }).data, 'realized');
     if (currentTab === 'history') renderHistoryTab();
+    if (currentTab === 'insights') renderInsightsTab();
   });
 
   // ── Refresh prices button ─────────────────────────────────────────────────
 
   const refreshBtn = document.getElementById('refresh-btn');
   if (refreshBtn) refreshBtn.addEventListener('click', refreshPrices);
+
+  // ── Insights refresh button ───────────────────────────────────────────────
+
+  document.getElementById('insights-refresh-btn')?.addEventListener('click', () => {
+    loadInsightsData({ force: true }).then(() => {
+      renderInsightsNews();
+      renderInsightsRecommendation();
+      renderEpsChart();
+    });
+  });
 
   // ── Log Purchase modal ──────────────────────────────────────────────────────
 
@@ -1572,6 +1753,9 @@ function renderMonthlyChart(data) {
 function renderDashboard() {
   // When currency toggles on the history tab, just re-render the chart
   if (currentTab === 'history') { renderHistoryChart(); return; }
+  // Insights has no currency-dependent content (EPS is reported in the
+  // company's own currency, not converted anywhere else in the app either).
+  if (currentTab === 'insights') return;
 
   const isRealized = currentTab === 'realized';
   const data = isRealized ? globalRealizedData : globalActiveData;
@@ -2195,4 +2379,290 @@ function renderHistoryMetrics(seriesData, pctChanges, color) {
       <span class="history-metric-value" style="color:${color}">${formatCurrency(lastVal)}</span>
     </div>
   `;
+}
+
+// ── Insights Tab ─────────────────────────────────────────────────────────────
+
+function renderInsightsTab() {
+  const hasKey = !!localStorage.getItem('finnhub_api_key');
+
+  document.getElementById('insights-empty').classList.toggle('hidden', hasKey);
+  document.getElementById('insights-controls-section').classList.toggle('hidden', !hasKey);
+  document.getElementById('insights-news-section').classList.toggle('hidden', !hasKey);
+  if (!hasKey) return;
+
+  renderInsightsTickerFilter();
+
+  const loadingEl = document.getElementById('insights-news-loading');
+  if (loadingEl) loadingEl.classList.remove('hidden');
+
+  loadInsightsData().then(() => {
+    renderInsightsNews();
+    renderInsightsRecommendation();
+    renderEpsChart();
+  });
+}
+
+function renderInsightsTickerFilter() {
+  const container = document.getElementById('insights-ticker-filter');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const select = document.createElement('select');
+  select.id = 'insights-ticker-select';
+  select.className = 'ticker-select';
+
+  const allOpt = document.createElement('option');
+  allOpt.value = '__ALL__';
+  allOpt.textContent = 'All My Holdings';
+  select.appendChild(allOpt);
+
+  const heldTickers = [...new Set(globalActiveData.map(item => normalizeTicker(item.ticker, item.originalBase)))].sort();
+  heldTickers.forEach(ticker => {
+    const opt = document.createElement('option');
+    opt.value = ticker;
+    opt.textContent = ticker;
+    select.appendChild(opt);
+  });
+
+  select.value = selectedInsightsTicker && heldTickers.includes(selectedInsightsTicker) ? selectedInsightsTicker : '__ALL__';
+
+  select.addEventListener('change', () => {
+    selectedInsightsTicker = select.value === '__ALL__' ? null : select.value;
+    loadInsightsData().then(() => {
+      renderInsightsNews();
+      renderInsightsRecommendation();
+      renderEpsChart();
+    });
+  });
+
+  container.appendChild(select);
+}
+
+function formatNewsDate(unixSeconds) {
+  if (!unixSeconds) return '';
+  return new Date(unixSeconds * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// Only allow http(s) URLs through to href/src — Finnhub is a trusted API,
+// but this is external content and a cheap guard against a javascript:
+// or data: URL slipping into a clickable link.
+const safeUrl = (url) => /^https?:\/\//i.test(String(url || '')) ? url : '';
+
+function buildNewsItemHtml(item, showTickerBadge) {
+  const imgSrc = safeUrl(item.image);
+  const thumb  = imgSrc
+    ? `<img class="insights-news-thumb" src="${escapeHtml(imgSrc)}" alt="" onerror="this.remove()">`
+    : '';
+  const tickerBadge = showTickerBadge
+    ? `<span>·</span><span class="category-badge">${escapeHtml(item._ticker)}</span>`
+    : '';
+  const href = safeUrl(item.url);
+  const headline = href
+    ? `<a class="insights-news-headline" href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(item.headline)}</a>`
+    : `<span class="insights-news-headline">${escapeHtml(item.headline)}</span>`;
+
+  return `
+    <li class="insights-news-item">
+      ${thumb}
+      <div class="insights-news-body">
+        ${headline}
+        <div class="insights-news-meta">
+          <span>${escapeHtml(item.source)}</span>
+          <span>·</span>
+          <span>${formatNewsDate(item.datetime)}</span>
+          ${tickerBadge}
+        </div>
+      </div>
+    </li>
+  `;
+}
+
+function renderInsightsNews() {
+  const list       = document.getElementById('insights-news-list');
+  const topWrap    = document.getElementById('insights-news-top-wrap');
+  const topList    = document.getElementById('insights-news-top-list');
+  const moreHeading = document.getElementById('insights-news-more-heading');
+  const emptyEl    = document.getElementById('insights-news-empty');
+  const titleEl    = document.getElementById('insights-news-title');
+  const loadingEl  = document.getElementById('insights-news-loading');
+  if (!list || !topWrap || !topList || !moreHeading || !emptyEl || !titleEl) return;
+
+  if (loadingEl) loadingEl.classList.add('hidden');
+
+  const showTickerBadge = !selectedInsightsTicker;
+  let items;
+  if (selectedInsightsTicker) {
+    titleEl.textContent = `Recent Company News — ${selectedInsightsTicker}`;
+    items = (insightsCache.news[selectedInsightsTicker] || [])
+      .map(item => ({ ...item, _ticker: selectedInsightsTicker }))
+      .sort((a, b) => b.datetime - a.datetime);
+  } else {
+    titleEl.textContent = 'Recent Company News — All My Holdings';
+    const tickers = [...new Set(globalActiveData.map(item => normalizeTicker(item.ticker, item.originalBase)))];
+    const merged = [];
+    tickers.forEach(ticker => {
+      (insightsCache.news[ticker] || []).forEach(item => merged.push({ ...item, _ticker: ticker }));
+    });
+    merged.sort((a, b) => b.datetime - a.datetime);
+    items = merged.slice(0, 50);
+  }
+
+  if (items.length === 0) {
+    topWrap.classList.add('hidden');
+    moreHeading.classList.add('hidden');
+    list.innerHTML = '';
+    emptyEl.textContent = selectedInsightsTicker
+      ? `No recent news found for ${selectedInsightsTicker}.`
+      : 'No recent news found.';
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+
+  // "Top Stories" = most recent items from recognized major outlets (see
+  // isMajorSource) — a source-reputation heuristic since Finnhub itself
+  // doesn't score importance/relevance. Everything else follows below in
+  // plain chronological order, with the Top Stories items excluded so
+  // nothing is shown twice.
+  const topStories = items.filter(item => isMajorSource(item.source)).slice(0, TOP_STORIES_LIMIT);
+  const topKeys = new Set(topStories.map(item => item.id ?? item.url));
+  const rest = items.filter(item => !topKeys.has(item.id ?? item.url));
+
+  topWrap.classList.toggle('hidden', topStories.length === 0);
+  topList.innerHTML = topStories.map(item => buildNewsItemHtml(item, showTickerBadge)).join('');
+
+  moreHeading.classList.toggle('hidden', topStories.length === 0);
+  list.innerHTML = rest.map(item => buildNewsItemHtml(item, showTickerBadge)).join('');
+}
+
+// Consensus = whichever bucket has the most analyst votes (mode of the
+// distribution), defaulting to Hold on an all-zero/empty response.
+function computeConsensusBucket(rec) {
+  const buckets = [
+    { key: 'strongBuy',  label: 'Strong Buy',  cls: 'strong-buy' },
+    { key: 'buy',        label: 'Buy',         cls: 'buy' },
+    { key: 'hold',       label: 'Hold',        cls: 'hold' },
+    { key: 'sell',       label: 'Sell',        cls: 'sell' },
+    { key: 'strongSell', label: 'Strong Sell', cls: 'strong-sell' },
+  ];
+  let top = buckets[2];
+  buckets.forEach(b => { if ((rec[b.key] || 0) > (rec[top.key] || 0)) top = b; });
+  return top;
+}
+
+function renderInsightsRecommendation() {
+  const container = document.getElementById('insights-recommendation');
+  const emptyEl    = document.getElementById('insights-recommendation-empty');
+  if (!container || !emptyEl) return;
+
+  if (!selectedInsightsTicker) {
+    container.classList.add('hidden');
+    emptyEl.textContent = 'Select a specific ticker to see analyst recommendation consensus.';
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  const rec = insightsCache.recommendation[selectedInsightsTicker];
+  if (!rec) {
+    container.classList.add('hidden');
+    emptyEl.textContent = `No analyst recommendation data available for ${selectedInsightsTicker}.`;
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+  container.classList.remove('hidden');
+
+  const top = computeConsensusBucket(rec);
+  const periodLabel = rec.period && !isNaN(new Date(rec.period))
+    ? new Date(rec.period).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })
+    : '';
+
+  container.innerHTML = `
+    <div class="insights-consensus-row">
+      <span class="history-metric-label">Consensus${periodLabel ? ` (${periodLabel})` : ''}</span>
+      <span class="rec-badge ${top.cls}">${top.label}</span>
+    </div>
+    <div class="insights-rec-grid">
+      <div class="history-metric-item">
+        <span class="history-metric-label">Strong Buy</span>
+        <span class="history-metric-value">${rec.strongBuy || 0}</span>
+      </div>
+      <div class="history-metric-item">
+        <span class="history-metric-label">Buy</span>
+        <span class="history-metric-value">${rec.buy || 0}</span>
+      </div>
+      <div class="history-metric-item">
+        <span class="history-metric-label">Hold</span>
+        <span class="history-metric-value">${rec.hold || 0}</span>
+      </div>
+      <div class="history-metric-item">
+        <span class="history-metric-label">Sell</span>
+        <span class="history-metric-value">${rec.sell || 0}</span>
+      </div>
+      <div class="history-metric-item">
+        <span class="history-metric-label">Strong Sell</span>
+        <span class="history-metric-value">${rec.strongSell || 0}</span>
+      </div>
+    </div>
+  `;
+}
+
+const formatEps = (val) => (val === null || val === undefined || isNaN(val)) ? '–' : Number(val).toFixed(2);
+
+function renderEpsChart() {
+  const section = document.getElementById('insights-eps-section');
+  const emptyEl  = document.getElementById('insights-eps-empty');
+  const canvas   = document.getElementById('epsChart');
+  if (!section || !emptyEl || !canvas) return;
+
+  if (epsChartInstance) { epsChartInstance.destroy(); epsChartInstance = null; }
+
+  if (!selectedInsightsTicker) {
+    section.classList.add('hidden');
+    emptyEl.textContent = 'Select a specific ticker to see its EPS trend.';
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  const earnings = insightsCache.earnings[selectedInsightsTicker] || [];
+  if (earnings.length === 0 || typeof Chart === 'undefined') {
+    section.classList.add('hidden');
+    emptyEl.textContent = `No earnings data available for ${selectedInsightsTicker}.`;
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+  section.classList.remove('hidden');
+
+  epsChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: earnings.map(e => `Q${e.quarter} ${e.year}`),
+      datasets: [
+        { label: 'Actual',   data: earnings.map(e => e.actual),   backgroundColor: 'rgba(16,185,129,0.75)', borderRadius: 4, maxBarThickness: 28 },
+        { label: 'Estimate', data: earnings.map(e => e.estimate), backgroundColor: 'rgba(148,163,184,0.85)', borderRadius: 4, maxBarThickness: 28 },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', padding: 20 } },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#fff', bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
+          callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatEps(ctx.raw)}` }
+        }
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: '#94a3b8' } },
+        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', callback: (val) => formatEps(val) } }
+      }
+    }
+  });
 }
