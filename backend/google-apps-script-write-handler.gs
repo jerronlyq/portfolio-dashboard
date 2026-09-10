@@ -31,6 +31,10 @@
 //    function dropdown, click Run) to register the 8am daily snapshot
 //    trigger. Re-running it is safe — it clears any existing dailySnapshot
 //    trigger first.
+// 4b. Run createLivePriceTrigger() once too, to keep SGX (.SI) prices fresh
+//    in a "Live Price" column of Active Holdings (auto-created on first
+//    run). The dashboard reads that column for SGX tickers since it can't
+//    fetch them itself.
 // 5. Deploy → New deployment → type "Web app":
 //      Execute as:      Me
 //      Who has access:  Anyone
@@ -206,6 +210,85 @@ function createDailyTrigger() {
     .create();
 
   console.log('Trigger created: dailySnapshot will run at 8am SGT every day.');
+}
+
+// ── Live Prices ──────────────────────────────────────────────────────────────
+//
+// The dashboard fetches US prices itself (Finnhub, real-time). It CANNOT
+// fetch SGX (.SI) prices though — Yahoo's API has no CORS headers and the
+// public CORS proxies it used to relay through are dead. This runs
+// server-side (no CORS problem) and keeps a "Live Price" column in Active
+// Holdings up to date for SGX tickers; the dashboard reads that column.
+//
+// Only .SI tickers are fetched — US rows are left alone. Yahoo rate-limits
+// by IP and Apps Script shares Google's IP pool, so a fetch that comes back
+// empty (429) leaves the existing cell value untouched: a slightly stale
+// price beats a blank one.
+//
+// Run createLivePriceTrigger() once to schedule it.
+function refreshLivePrices() {
+  const sheetId = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
+  const ss = sheetId ? SpreadsheetApp.openById(sheetId) : SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(ACTIVE_SHEET);
+  if (!sheet) { console.error(`Sheet "${ACTIVE_SHEET}" not found.`); return; }
+
+  const data   = sheet.getDataRange().getValues();
+  const header  = data[0].map(h => String(h).toLowerCase().trim());
+  const cTicker   = header.findIndex(h => h.includes('ticker') || h.includes('symbol'));
+  const cCurrency = header.findIndex(h => h.includes('currency'));
+  let   cLive     = header.findIndex(h => h.includes('live price'));
+
+  if (cTicker < 0) { console.error('No Ticker/Symbol column in Active Holdings.'); return; }
+
+  // Auto-create the "Live Price" column on first run.
+  if (cLive < 0) {
+    cLive = header.length;
+    sheet.getRange(1, cLive + 1).setValue('Live Price');
+  }
+
+  // Collect SGX rows only. A row is SGX if its ticker ends in .SI, or its
+  // currency is SGD (in which case we append .SI to form the Yahoo symbol).
+  const targets = []; // { row (1-based), yfTicker }
+  for (let i = 1; i < data.length; i++) {
+    const rawTicker = String(data[i][cTicker] || '').trim().toUpperCase();
+    if (!rawTicker) continue;
+    const currency = cCurrency >= 0 ? String(data[i][cCurrency] || 'USD').trim().toUpperCase() : 'USD';
+    const isSgx = rawTicker.endsWith('.SI') || (currency === 'SGD' && !rawTicker.includes('.'));
+    if (!isSgx) continue;
+    const yfTicker = rawTicker.endsWith('.SI') ? rawTicker : rawTicker + '.SI';
+    targets.push({ row: i + 1, yfTicker });
+  }
+
+  if (targets.length === 0) { console.log('refreshLivePrices: no SGX tickers to update.'); return; }
+
+  const prices = batchFetchPrices(targets.map(t => t.yfTicker));
+
+  let updated = 0;
+  targets.forEach(t => {
+    const price = prices[t.yfTicker.toUpperCase()];
+    if (price > 0) {
+      sheet.getRange(t.row, cLive + 1).setValue(price);  // native currency (SGD for .SI)
+      updated++;
+    }
+    // else: Yahoo returned nothing (likely 429) — leave the old value in place.
+  });
+
+  SpreadsheetApp.flush();
+  console.log(`refreshLivePrices: ${updated}/${targets.length} SGX prices updated at ${new Date().toISOString()}.`);
+}
+
+// ── Trigger Setup: run this ONCE from the editor to schedule live prices ──
+function createLivePriceTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(t => t.getHandlerFunction() === 'refreshLivePrices')
+    .forEach(t => ScriptApp.deleteTrigger(t));
+
+  ScriptApp.newTrigger('refreshLivePrices')
+    .timeBased()
+    .everyMinutes(30)   // 30 min keeps Yahoo 429 exposure low; SGX prices via this route are not real-time anyway
+    .create();
+
+  console.log('Trigger created: refreshLivePrices will run every 30 minutes.');
 }
 
 // ── Write-Back Handler: "Log Purchase" / "Log Sale" / "Log Dividend" ───────

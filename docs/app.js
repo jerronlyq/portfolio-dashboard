@@ -179,27 +179,6 @@ function updateSourcePills() {
   }
 }
 
-// ── CORS Proxy Chain (SGX Yahoo fallback only) ───────────────────────────────
-
-const CORS_PROXIES = [
-  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-  url => `https://api.codetabs.com/v1/proxy/?quest=${encodeURIComponent(url)}`,
-];
-
-async function fetchWithProxy(targetUrl) {
-  for (const proxyFn of CORS_PROXIES) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 6000);
-      const res = await fetch(proxyFn(targetUrl), { signal: controller.signal });
-      clearTimeout(timer);
-      if (res.ok) return res;
-    } catch (e) { /* try next proxy */ }
-  }
-  return null;
-}
-
 // ── Exchange Rate ─────────────────────────────────────────────────────────────
 
 async function fetchExchangeRate() {
@@ -288,35 +267,12 @@ async function fetchLivePrices(tickers) {
     }));
   }
 
-  // ── 2. Yahoo Finance — SGX (.SI) tickers via CORS proxy ─────────────────
-  const sgxMisses = cleanTickers.filter(t => t.endsWith('.SI') && !dictionary[t]?.price);
-  if (sgxMisses.length > 0) {
-    try {
-      await Promise.all(sgxMisses.map(async (ticker) => {
-        try {
-          const url = `https://query2.finance.yahoo.com/v8/finance/chart/${ticker}?interval=1d&range=1d`;
-          const res = await fetchWithProxy(url);
-          if (res) {
-            const data = await res.json();
-            const meta      = data?.chart?.result?.[0]?.meta;
-            const price     = meta?.regularMarketPrice;
-            const prevClose = meta?.previousClose ?? meta?.chartPreviousClose;
-            if (price) {
-              const changePct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : undefined;
-              dictionary[ticker] = { price, changePct, name: nameOf(ticker), source: 'Yahoo' };
-              console.log(`[Yahoo SGX] ✓ ${ticker}: ${price} (${changePct?.toFixed(2)}%)`);
-            } else {
-              console.warn(`[Yahoo SGX] ✗ ${ticker}: no price in response`, data);
-            }
-          }
-        } catch (e) {
-          console.warn(`[Yahoo SGX] failed for ${ticker}:`, e);
-        }
-      }));
-    } catch (e) {
-      console.warn('[Yahoo SGX] fallback failed:', e);
-    }
-  }
+  // ── 2. SGX (.SI) tickers — NOT fetched here ─────────────────────────────
+  // Yahoo's API has no CORS headers and the public CORS proxies this used
+  // to relay through are dead. SGX prices now come from a "Live Price"
+  // column that the Apps Script backend (refreshLivePrices) keeps fresh on
+  // the sheet; processData() reads that column when no live quote is found
+  // for a ticker. Nothing to do here.
 
   // ── 4. Apply static names ─────────────────────────────────────────────────
   cleanTickers.forEach(ticker => {
@@ -970,8 +926,10 @@ async function processData(data, targetTab, showLoader = true) {
       let dayChangePct = dictData?.changePct;
 
       if (mktPrice === 0) {
-        mktPrice   = parseNum(findValue(row, ['market price', 'current price', 'live price', 'googlefinance']));
-        dataSource = 'Google';
+        // Sheet-provided price (e.g. the "Live Price" column the Apps Script
+        // backend keeps fresh for SGX tickers).
+        mktPrice   = parseNum(findValue(row, ['live price', 'market price', 'current price', 'googlefinance']));
+        dataSource = mktPrice > 0 ? 'Yahoo' : dataSource;
         dayChangePct = undefined;
       }
 
@@ -995,6 +953,14 @@ async function processData(data, targetTab, showLoader = true) {
 
     globalActiveData = processedData;
     if (currentTab === 'active') renderDashboard();
+    // If the user already switched to Insights before this (async) load
+    // resolved, renderInsightsTab()'s first pass would have built the
+    // ticker filter and fetched news against an empty globalActiveData —
+    // re-running it now that holdings actually exist fixes both the
+    // filter (was stuck showing only "All My Holdings") and the news feed
+    // (was stuck fetching for zero tickers), without needing the user to
+    // leave and re-enter the tab.
+    if (currentTab === 'insights') renderInsightsTab();
   }
 
   // ── REALIZED HISTORY ──────────────────────────────────────────────────────
