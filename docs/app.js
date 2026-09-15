@@ -133,6 +133,16 @@ const FINNHUB_CRYPTO_MAP = {
 };
 const toFinnhubSymbol = (ticker) => FINNHUB_CRYPTO_MAP[ticker] || ticker;
 
+// Exchange suffixes Finnhub's free tier doesn't cover (confirmed against
+// their pricing page: "International Market Data" is paid-only) — must
+// match NON_US_SUFFIXES in backend/google-apps-script-write-handler.gs.
+// These are excluded from the Finnhub batch below (they'd just fail) and
+// instead come from the "Live Price" column the Apps Script backend keeps
+// fresh via Yahoo. NOT "any ticker with a dot": BRK.B is a normal US
+// ticker that happens to contain one and must stay on the Finnhub path.
+const NON_US_SUFFIXES = ['.SI', '.L', '.DE', '.PA', '.AS', '.SW', '.HK', '.TO'];
+const hasNonUsSuffix = (ticker) => NON_US_SUFFIXES.some(sfx => ticker.endsWith(sfx));
+
 const SOURCE_COLORS = {
   'Finnhub': 'var(--accent-orange)',
   'Yahoo':   'var(--accent-cyan)',
@@ -244,7 +254,7 @@ async function fetchLivePrices(tickers) {
 
   // ── 1. Finnhub — US stocks, ETFs, crypto (direct CORS, no proxy) ─────────
   if (finnhubKey) {
-    const finnhubTickers = cleanTickers.filter(t => !t.endsWith('.SI'));
+    const finnhubTickers = cleanTickers.filter(t => !hasNonUsSuffix(t));
     await Promise.all(finnhubTickers.map(async (ticker) => {
       try {
         const controller = new AbortController();
@@ -267,9 +277,9 @@ async function fetchLivePrices(tickers) {
     }));
   }
 
-  // ── 2. SGX (.SI) tickers — NOT fetched here ─────────────────────────────
+  // ── 2. Non-US tickers (SGX, LSE, Xetra, ...) — NOT fetched here ─────────
   // Yahoo's API has no CORS headers and the public CORS proxies this used
-  // to relay through are dead. SGX prices now come from a "Live Price"
+  // to relay through are dead. These prices come from a "Live Price"
   // column that the Apps Script backend (refreshLivePrices) keeps fresh on
   // the sheet; processData() reads that column when no live quote is found
   // for a ticker. Nothing to do here.
@@ -323,11 +333,12 @@ async function refreshPrices() {
 
 // ── Insights: Finnhub News / Recommendations / Earnings ─────────────────────
 //
-// Unlike fetchLivePrices() (which has a Yahoo fallback for .SI tickers),
-// these three endpoints are Finnhub-only with no fallback source, and
-// Finnhub's free tier is US-coverage — non-US tickers will just come back
-// empty, which the render functions already treat as a normal empty state
-// rather than an error.
+// Unlike fetchLivePrices() (which falls back to the sheet's "Live Price"
+// column for non-US tickers, via the Apps Script backend), these three
+// endpoints are Finnhub-only with no fallback source, and Finnhub's free
+// tier is US-coverage — non-US tickers will just come back empty, which
+// the render functions already treat as a normal empty state rather than
+// an error.
 
 async function fetchTickerNews(ticker, { force = false } = {}) {
   if (!force && insightsCache.news[ticker]) return insightsCache.news[ticker];

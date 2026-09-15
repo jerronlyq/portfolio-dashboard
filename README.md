@@ -67,10 +67,10 @@ immediately without waiting for a page reload.
 │ • Live Price col  │                                     │
 └─────────▲─────────┘                                     │
           │ scheduled: daily snapshot +                   │
-          │ 30-min SGX price refresh                      │
+          │ 30-min non-US price refresh                   │
 ┌─────────┴─────────┐                                     │
 │  Apps Script       │  ──►  Yahoo Finance  ───────────────┘
-│  (backend/*.gs)    │       (SGX prices, snapshots)
+│  (backend/*.gs)    │       (non-US prices, snapshots)
 └────────────────────┘
 ```
 
@@ -80,8 +80,9 @@ immediately without waiting for a page reload.
   tiny web service (free, hosted by Google) that the dashboard calls when
   you log a purchase, sale, or dividend. It also runs two scheduled jobs: a
   once-a-day portfolio-value snapshot for the History chart, and a
-  30-minute refresh of SGX prices into a `Live Price` column (the dashboard
-  can't fetch those itself — Yahoo has no CORS support).
+  30-minute refresh of non-US prices (SGX, LSE, Xetra, Euronext, SIX, Hong
+  Kong, Toronto) into a `Live Price` column — the dashboard can't fetch
+  those itself (Finnhub's free tier is US-only, Yahoo has no CORS support).
 - **The dashboard** reads your Sheet as CSV (no auth needed beyond "anyone
   with the link can view"), and separately calls Finnhub directly from your
   browser for US live prices, news, and analyst data.
@@ -161,15 +162,17 @@ below — sharing "view" access doesn't let anyone edit your Sheet.)
    `createDailyTrigger`, and click **Run** once. This registers the job that
    snapshots your portfolio value every day at 8am. (Re-running this later
    is safe — it won't create duplicates.)
-6. Do the same for `createLivePriceTrigger` — this refreshes SGX (`.SI`)
-   prices into a "Live Price" column of `Active Holdings` every 30 minutes
-   (the column is created automatically on first run). The dashboard can
-   fetch US prices itself, but not SGX ones, so this is how `.SI` holdings
-   get a current price.
-8. **Deploy → New deployment** → type **Web app**:
+6. Do the same for `createLivePriceTrigger` — this refreshes non-US prices
+   (any ticker ending in `.SI`, `.L`, `.DE`, `.PA`, `.AS`, `.SW`, `.HK`, or
+   `.TO` — see `NON_US_SUFFIXES` in the script if you need to add more)
+   into a "Live Price" column of `Active Holdings` every 30 minutes (the
+   column is created automatically on first run). The dashboard can fetch
+   US prices itself, but not these, so this is how non-US holdings get a
+   current price.
+7. **Deploy → New deployment** → type **Web app**:
    - Execute as: **Me**
    - Who has access: **Anyone**
-9. Click **Deploy**, then copy the **Web app URL** it gives you — you'll
+8. Click **Deploy**, then copy the **Web app URL** it gives you — you'll
    paste this into the dashboard in step 5.
 
 > Editing the script later? Saving in the editor alone doesn't update the
@@ -185,11 +188,14 @@ copy your API key from their dashboard. Without it, US prices fall back to
 whatever's in a `Live Price` / `Market Price` column of your sheet, and the
 Insights tab shows a prompt to add a key.
 
-**SGX (`.SI`) prices** don't come from Finnhub (its free tier is US-only) or
-from the browser at all — the dashboard can't reach Yahoo Finance directly
-(no CORS). They come from the `Live Price` column that the Apps Script
-backend refreshes every 30 minutes (setup step 6 above). So SGX prices are
-~30-min delayed, and only update while that trigger is running.
+**Non-US prices** (SGX, LSE, Xetra, Euronext, SIX, Hong Kong, Toronto) don't
+come from Finnhub (its free tier is US-only) or from the browser at all —
+the dashboard can't reach Yahoo Finance directly (no CORS). They come from
+the `Live Price` column that the Apps Script backend refreshes every 30
+minutes (setup step 6 above). So those prices are ~30-min delayed, and only
+update while that trigger is running. Use the full Yahoo symbol as your
+ticker (e.g. `D05.SI`, `VWRA.L`) — look it up on
+[finance.yahoo.com](https://finance.yahoo.com) if you're not sure of it.
 
 ### 4. Deploy the dashboard
 
@@ -344,15 +350,18 @@ It populates from your holdings once they've finished loading — on a slow
 connection this can take a second or two, and it'll fill in on its own
 without needing to leave and re-enter the tab.
 
-**SGX (`.SI`) holdings show no price / a stale price.**
-SGX prices come from the `Live Price` column, refreshed by the Apps Script
-`refreshLivePrices` trigger every 30 min. Check: (a) you ran
-`createLivePriceTrigger` once (setup step 6); (b) the trigger is actually
-firing — Apps Script editor → Triggers (clock icon) → look for
-`refreshLivePrices`, and Executions for any failures; (c) an all-`#N/A` or
-blank column usually means Yahoo rate-limited (429) that run — it'll
-recover on the next one, and the code keeps the last good value rather than
-blanking it.
+**Non-US holdings (SGX, LSE, etc.) show no price / a stale price.**
+These prices come from the `Live Price` column, refreshed by the Apps
+Script `refreshLivePrices` trigger every 30 min. Check: (a) your ticker is
+the full Yahoo symbol and ends in a suffix listed in `NON_US_SUFFIXES`
+(e.g. `D05.SI`, `VWRA.L`) — a bare ticker like `DBS` or `VWRA` won't be
+recognized (except the legacy SGX shortcut: a bare code with Currency =
+`SGD`); (b) you ran `createLivePriceTrigger` once (setup step 6); (c) the
+trigger is actually firing — Apps Script editor → Triggers (clock icon) →
+look for `refreshLivePrices`, and Executions for any failures; (d) an
+all-`#N/A` or blank column usually means Yahoo rate-limited (429) that run
+— it'll recover on the next one, and the code keeps the last good value
+rather than blanking it.
 
 **A ticker shows no news / no analyst data / no earnings data.**
 Finnhub's free tier is US/North-America-coverage only — non-US tickers

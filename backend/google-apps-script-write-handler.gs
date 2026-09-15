@@ -31,10 +31,11 @@
 //    function dropdown, click Run) to register the 8am daily snapshot
 //    trigger. Re-running it is safe — it clears any existing dailySnapshot
 //    trigger first.
-// 4b. Run createLivePriceTrigger() once too, to keep SGX (.SI) prices fresh
-//    in a "Live Price" column of Active Holdings (auto-created on first
-//    run). The dashboard reads that column for SGX tickers since it can't
-//    fetch them itself.
+// 4b. Run createLivePriceTrigger() once too, to keep non-US prices (SGX,
+//    LSE, Xetra, Euronext, SIX, Hong Kong, Toronto — see NON_US_SUFFIXES)
+//    fresh in a "Live Price" column of Active Holdings (auto-created on
+//    first run). The dashboard reads that column for those tickers since
+//    it can't fetch them itself (Finnhub's free tier is US-only).
 // 5. Deploy → New deployment → type "Web app":
 //      Execute as:      Me
 //      Who has access:  Anyone
@@ -215,17 +216,32 @@ function createDailyTrigger() {
 // ── Live Prices ──────────────────────────────────────────────────────────────
 //
 // The dashboard fetches US prices itself (Finnhub, real-time). It CANNOT
-// fetch SGX (.SI) prices though — Yahoo's API has no CORS headers and the
-// public CORS proxies it used to relay through are dead. This runs
-// server-side (no CORS problem) and keeps a "Live Price" column in Active
-// Holdings up to date for SGX tickers; the dashboard reads that column.
+// fetch prices for non-US exchanges though — Finnhub's free tier doesn't
+// cover "International Market Data" (confirmed against their pricing page),
+// and Yahoo's API has no CORS headers with the public CORS proxies this
+// used to relay through now dead. This runs server-side (no CORS problem)
+// and keeps a "Live Price" column in Active Holdings fresh for those
+// tickers; the dashboard reads that column whenever its own live-price
+// lookup comes back empty.
 //
-// Only .SI tickers are fetched — US rows are left alone. Yahoo rate-limits
-// by IP and Apps Script shares Google's IP pool, so a fetch that comes back
-// empty (429) leaves the existing cell value untouched: a slightly stale
-// price beats a blank one.
+// A row is routed here if its ticker ends in one of NON_US_SUFFIXES (below),
+// or — legacy/backward-compat — its currency is SGD and it has no exchange
+// suffix at all (bare SGX code), in which case .SI is assumed. Deliberately
+// NOT "any ticker containing a dot": BRK.B (Berkshire Hathaway) is a normal
+// US ticker that happens to contain one, and must stay on the Finnhub path.
+//
+// Yahoo rate-limits by IP and Apps Script shares Google's IP pool, so a
+// fetch that comes back empty (429) leaves the existing cell value
+// untouched: a slightly stale price beats a blank one.
 //
 // Run createLivePriceTrigger() once to schedule it.
+const NON_US_SUFFIXES = ['.SI', '.L', '.DE', '.PA', '.AS', '.SW', '.HK', '.TO'];
+// SGX, LSE, Xetra, Euronext Paris, Euronext Amsterdam, SIX Swiss, Hong Kong, Toronto.
+// Add more here as needed — this list only needs to cover exchanges you
+// actually hold something on; Finnhub's own free-tier exclusion is broader
+// ("International Market Data" generally), but Yahoo covers far more than
+// this, so extending it is just adding a suffix, no other code changes.
+
 function refreshLivePrices() {
   const sheetId = PropertiesService.getScriptProperties().getProperty('SHEET_ID');
   const ss = sheetId ? SpreadsheetApp.openById(sheetId) : SpreadsheetApp.getActiveSpreadsheet();
@@ -246,20 +262,21 @@ function refreshLivePrices() {
     sheet.getRange(1, cLive + 1).setValue('Live Price');
   }
 
-  // Collect SGX rows only. A row is SGX if its ticker ends in .SI, or its
-  // currency is SGD (in which case we append .SI to form the Yahoo symbol).
   const targets = []; // { row (1-based), yfTicker }
   for (let i = 1; i < data.length; i++) {
     const rawTicker = String(data[i][cTicker] || '').trim().toUpperCase();
     if (!rawTicker) continue;
     const currency = cCurrency >= 0 ? String(data[i][cCurrency] || 'USD').trim().toUpperCase() : 'USD';
-    const isSgx = rawTicker.endsWith('.SI') || (currency === 'SGD' && !rawTicker.includes('.'));
-    if (!isSgx) continue;
-    const yfTicker = rawTicker.endsWith('.SI') ? rawTicker : rawTicker + '.SI';
+
+    const hasNonUsSuffix = NON_US_SUFFIXES.some(sfx => rawTicker.endsWith(sfx));
+    const isLegacySgx    = currency === 'SGD' && !rawTicker.includes('.');
+    if (!hasNonUsSuffix && !isLegacySgx) continue;
+
+    const yfTicker = hasNonUsSuffix ? rawTicker : rawTicker + '.SI';
     targets.push({ row: i + 1, yfTicker });
   }
 
-  if (targets.length === 0) { console.log('refreshLivePrices: no SGX tickers to update.'); return; }
+  if (targets.length === 0) { console.log('refreshLivePrices: no non-US tickers to update.'); return; }
 
   const prices = batchFetchPrices(targets.map(t => t.yfTicker));
 
@@ -267,14 +284,15 @@ function refreshLivePrices() {
   targets.forEach(t => {
     const price = prices[t.yfTicker.toUpperCase()];
     if (price > 0) {
-      sheet.getRange(t.row, cLive + 1).setValue(price);  // native currency (SGD for .SI)
+      sheet.getRange(t.row, cLive + 1).setValue(price);  // native listing currency
       updated++;
     }
-    // else: Yahoo returned nothing (likely 429) — leave the old value in place.
+    // else: Yahoo returned nothing (likely 429, or an unrecognized symbol)
+    // — leave the old value in place.
   });
 
   SpreadsheetApp.flush();
-  console.log(`refreshLivePrices: ${updated}/${targets.length} SGX prices updated at ${new Date().toISOString()}.`);
+  console.log(`refreshLivePrices: ${updated}/${targets.length} non-US prices updated at ${new Date().toISOString()}.`);
 }
 
 // ── Trigger Setup: run this ONCE from the editor to schedule live prices ──
