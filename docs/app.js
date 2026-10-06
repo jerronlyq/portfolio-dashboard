@@ -804,9 +804,17 @@ function fetchRemoteCSV(url, targetTab) {
     loader.classList.remove('hidden');
   }
   const liveUrl = url + (url.includes('?') ? '&' : '?') + 'nocache=' + Date.now();
-  Papa.parse(liveUrl, {
-    download: true, header: true, skipEmptyLines: true,
-    complete: (results) => {
+  fetch(liveUrl)
+    .then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.text();
+    })
+    .then(text => {
+      // Sheets exports unused blank columns to the right as "","" — Papa
+      // mis-parses that header and swallows the first data row into a
+      // garbage column name. Strip trailing blank columns before parsing.
+      const cleaned = stripTrailingBlankColumns(text);
+      const results = Papa.parse(cleaned, { header: true, skipEmptyLines: true });
       if (results.data?.length > 0) {
         if (targetTab === 'snapshot') handleSnapshotData(results.data);
         else processData(results.data, targetTab);
@@ -814,12 +822,21 @@ function fetchRemoteCSV(url, targetTab) {
         if (loader) loader.classList.add('hidden');
         alert(`The CSV for ${targetTab} returned no valid rows.`);
       }
-    },
-    error: (error) => {
+    })
+    .catch(error => {
       if (loader) loader.classList.add('hidden');
       alert(`Error fetching ${targetTab} CSV.\n${error.message}`);
-    }
-  });
+    });
+}
+
+// Removes trailing empty quoted fields ("") from every line of a CSV.
+// Only touches empty fields at the end of a line, so values containing
+// commas inside quotes are never affected.
+function stripTrailingBlankColumns(csvText) {
+  return csvText
+    .split(/\r?\n/)
+    .map(line => line.replace(/(,"")+$/, ''))
+    .join('\n');
 }
 
 // ── Snapshot Data Handler ────────────────────────────────────────────────────
