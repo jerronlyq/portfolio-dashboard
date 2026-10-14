@@ -542,6 +542,16 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   color: var(--accent-cyan);
   border-color: rgba(6, 182, 212, 0.3);
 }
+.type-badge.buy {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--accent-green);
+  border-color: rgba(16, 185, 129, 0.3);
+}
+.type-badge.sell {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--accent-red);
+  border-color: rgba(239, 68, 68, 0.3);
+}
 
 .currency-badge {
   display: inline-block;
@@ -913,6 +923,36 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   flex-direction: column;
   gap: 2rem;
 }
+
+/* ── Transaction Log Tab ──────────────────────────────────────────────────── */
+#transactions-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+/* ── Pagination ───────────────────────────────────────────────────────────── */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+.page-btn {
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--card-border);
+  color: var(--text-secondary);
+  border-radius: 8px;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+}
+.page-btn:hover:not(:disabled) { color: var(--text-primary); background: rgba(255,255,255,0.08); }
+.page-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.page-label { font-size: 0.82rem; color: var(--text-secondary); }
 
 .insights-news-subheading {
   font-size: 0.78rem;

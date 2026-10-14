@@ -34,6 +34,7 @@ entirely in your browser.
   - [Realized History](#realized-history)
   - [Portfolio History](#portfolio-history)
   - [Insights](#insights)
+  - [Transaction Log](#transaction-log)
 - [Troubleshooting](#troubleshooting)
 - [Security notes](#security-notes)
 
@@ -41,7 +42,7 @@ entirely in your browser.
 
 ## What it does
 
-The dashboard has four tabs:
+The dashboard has five tabs:
 
 | Tab | What you see |
 |---|---|
@@ -49,6 +50,7 @@ The dashboard has four tabs:
 | **Realized History** | Every closed trade and dividend you've logged: realized P&L, yearly summary, monthly breakdown chart. |
 | **Portfolio History** | A line chart of your total portfolio value over time, built from a snapshot Google takes of your holdings once a day. |
 | **Insights** | Recent news, analyst buy/hold/sell consensus, and an EPS-actual-vs-estimate chart — for whatever you currently hold. |
+| **Transaction Log** | A flat audit trail of every Buy/Sell you've logged — date, shares, commission, transacted price/share — plus a "this month" bought/sold/net cash-flow summary and a monthly Buy-vs-Sell chart. |
 
 You log activity — buys, sells, dividends — through modals in the dashboard;
 those write straight back to your Google Sheet, and the dashboard updates
@@ -63,6 +65,7 @@ immediately without waiting for a page reload.
 │                   │  ──────────────────────►  │   or local)      │        news, EPS,
 │ • Active Holdings │   writes (via Apps Script) └──────────────────┘        analysts)
 │ • Realized History│                                     ▲
+│ • Transactions    │                                     │
 │ • Snapshots       │                                     │
 │ • Live Price col  │                                     │
 └─────────▲─────────┘                                     │
@@ -74,15 +77,19 @@ immediately without waiting for a page reload.
 └────────────────────┘
 ```
 
-- **The Sheet** is your single source of truth — three tabs: `Active
-  Holdings`, `Realized History`, `Snapshots`.
+- **The Sheet** is your single source of truth — four tabs: `Active
+  Holdings`, `Realized History`, `Transactions`, `Snapshots`.
 - **Apps Script** is the only thing allowed to *write* to the Sheet. It's a
   tiny web service (free, hosted by Google) that the dashboard calls when
-  you log a purchase, sale, or dividend. It also runs two scheduled jobs: a
-  once-a-day portfolio-value snapshot for the History chart, and a
+  you log a purchase, sale, or dividend — every logged Buy/Sell also appends
+  a row to `Transactions` (the dashboard's Transaction Log tab reads this;
+  auto-created on first use if missing; dividends aren't included, since
+  they're cash income rather than a buy/sell). It also runs two scheduled
+  jobs: a once-a-day portfolio-value snapshot for the History chart, and a
   30-minute refresh of non-US prices (SGX, LSE, Xetra, Euronext, SIX, Hong
-  Kong, Toronto) into a `Live Price` column — the dashboard can't fetch
-  those itself (Finnhub's free tier is US-only, Yahoo has no CORS support).
+  Kong, Toronto) into a `Live Price` column — the
+  dashboard can't fetch those itself (Finnhub's free tier is US-only, Yahoo
+  has no CORS support).
 - **The dashboard** reads your Sheet as CSV (no auth needed beyond "anyone
   with the link can view"), and separately calls Finnhub directly from your
   browser for US live prices, news, and analyst data.
@@ -111,7 +118,11 @@ This takes about 15 minutes the first time. You only do it once.
 
 ### 1. Create your Google Sheet
 
-Create a new Google Sheet with **three tabs**, named exactly:
+Create a new Google Sheet with **three tabs**, named exactly (a fourth,
+`Transactions`, is created automatically the first time you log a purchase
+or sale — no need to add it yourself, though you can pre-create it with your
+own header row if you'd rather control the column names/order; the backend
+matches columns by keyword, same as the other tabs):
 
 **`Active Holdings`** — one row per position you currently hold.
 
@@ -134,6 +145,17 @@ a trade.
 **`Snapshots`** — left empty; the Apps Script backend fills this in
 automatically once a day. Columns: `Date, Ticker, Shares, Price, Total
 Value, Portfolio Total, Currency`.
+
+**`Transactions`** — powers the dashboard's Transaction Log tab; auto-created
+with a default header row the first time you log a purchase or sale if it
+doesn't already exist. It's a flat audit trail, separate from `Realized
+History`: every Buy and Sell lands here as its own row, regardless of
+whether the position is still open. Default columns: `Date, Type, Ticker,
+Currency, Shares, Transacted Price, Commission, Total Amount` — matched
+flexibly by keyword, so if you've already got a `Transactions` tab with
+differently-named or ordered columns, that's fine as long as each of those
+concepts (date/type/ticker/currency/shares/price/commission/total) is
+recognizable somewhere in the header row.
 
 Column headers are matched by **substring, case-insensitive** — "Total Cost
 Price" and "Cost" both work, "Shares" and "Qty" both work. You don't need to
@@ -256,11 +278,12 @@ commission.*
 - Total Cost (pre-fee): `10250` (25 × $410)
 - Commission Fees: `5`
 - Category: pick an existing one, or type a new one
+- Purchase Date: defaults to today, or pick an earlier date
 
 Submit — this either creates a new row in `Active Holdings`, or if you
 already hold MSFT, merges it into your existing position using a weighted
-average cost basis. The dashboard updates instantly; you don't need to
-re-sync.
+average cost basis. It also appends a row to `Transactions`. The
+dashboard updates instantly; you don't need to re-sync.
 
 ### Logging a sale
 
@@ -277,9 +300,9 @@ commission.*
 
 The preview shows your estimated realized P&L before you submit. Submitting
 reduces your `Active Holdings` position (or removes it entirely if you sold
-everything) and appends a row to `Realized History` with the calculated
-profit/loss. Selling more shares than you hold is rejected, both in the
-dashboard and by the backend.
+everything), appends a row to `Realized History` with the calculated
+profit/loss, and appends a row to `Transactions`. Selling more shares
+than you hold is rejected, both in the dashboard and by the backend.
 
 ### Logging a dividend
 
@@ -326,6 +349,23 @@ combined view) to see:
 
 This tab needs a Finnhub API key (step 3 above) — without one it shows a
 prompt to add one rather than an empty/broken page.
+
+### Transaction Log
+
+A flat ledger of every Buy and Sell you've logged, for backtracking exactly
+what you did and when — separate from Realized History, since it includes
+*every* purchase and sale (not just closed positions), and excludes
+dividends (they're cash income, not a buy/sell). Each row shows the date,
+type, ticker, currency, shares, transacted price per share, commission, and
+total amount (cash paid for a Buy including fees; net cash received for a
+Sell after fees).
+
+At the top, three cards answer "did I put money into the market this
+month?": **Bought This Month**, **Sold This Month**, and **Net Invested
+This Month** (Bought − Sold — positive means net money went in, negative
+means you net sold). Below that, a bar chart breaks Buy vs. Sell cash flow
+down by month, with a year filter. Sorted newest-first by default; click any
+column header to re-sort.
 
 ---
 
@@ -374,7 +414,7 @@ tab; this isn't a bug.
   your Apps Script URL" and "can write to your Sheet." Make it long and
   random, and don't share the deployment URL publicly.
 - Sharing your Sheet as "Anyone with the link can view" makes the **whole
-  spreadsheet** viewable by anyone who has that link — not just the three
+  spreadsheet** viewable by anyone who has that link — not just the four
   tabs the dashboard reads. If you ever add a tab with something sensitive,
   keep that in mind.
 - Everything you type into Data Sources (Sheet ID, API key, write token) is

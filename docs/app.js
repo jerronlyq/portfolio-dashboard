@@ -17,15 +17,17 @@ const CHART_COLORS = ['#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#3b82f6', '#e
 // Fixed tab names within the single Google Sheet — must match the
 // ACTIVE_SHEET / REALIZED_SHEET / SNAPSHOT_SHEET constants in
 // google-apps-script-write-handler.gs exactly.
-const SHEET_ACTIVE_TAB   = 'Active Holdings';
-const SHEET_REALIZED_TAB = 'Realized History';
-const SHEET_SNAPSHOT_TAB = 'Snapshots';
+const SHEET_ACTIVE_TAB       = 'Active Holdings';
+const SHEET_REALIZED_TAB     = 'Realized History';
+const SHEET_SNAPSHOT_TAB     = 'Snapshots';
+const SHEET_TRANSACTIONS_TAB = 'Transactions';
 
 let allocationChartInstance   = null;
 let holdingsHeatmapInstance   = null;
 let divergingChartInstance    = null;
 let historyChartInstance      = null;
 let monthlyChartInstance      = null;
+let txnMonthlyChartInstance   = null;
 let epsChartInstance          = null;
 
 // ── Global State ──────────────────────────────────────────────────────────────
@@ -35,11 +37,21 @@ let currentTab            = 'active';
 let currentSort           = { column: null, direction: 'asc', table: null };
 let globalActiveData      = [];
 let globalRealizedData    = [];
+let globalTransactionLog  = [];
 let globalSnapshotData    = null;   // { dates[], tickers[], series{} }
 let lastPriceUpdate       = null;
 let activeHistoryRange    = 'All';
 let selectedHistoryTickers = new Set();
 let selectedRealizedYear  = 'All';
+let selectedTxnYear       = 'All';
+let txnChartView          = 'monthly'; // 'monthly' | 'yearly'
+
+// Pagination: page 1 is always index 0 of the already-sorted/filtered array.
+// A distinct page counter per table since each paginates independently.
+const PAGE_SIZE = 20;
+let activePage       = 1;
+let realizedPage     = 1;
+let transactionsPage = 1;
 
 // Insights tab: session-only cache (no localStorage) keyed by normalized
 // ticker, so revisiting a ticker or switching tabs costs zero extra API
@@ -510,7 +522,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // ── Tab switching ─────────────────────────────────────────────────────────
 
   function activateTab(tabId) {
-    ['tab-active', 'tab-realized', 'tab-history', 'tab-insights'].forEach(id => {
+    ['tab-active', 'tab-realized', 'tab-history', 'tab-insights', 'tab-transactions'].forEach(id => {
       document.getElementById(id).classList.remove('active');
     });
     document.getElementById(tabId).classList.add('active');
@@ -518,6 +530,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('portfolio-content').classList.toggle('hidden', tabId !== 'tab-active' && tabId !== 'tab-realized');
     document.getElementById('history-content').classList.toggle('hidden', tabId !== 'tab-history');
     document.getElementById('insights-content').classList.toggle('hidden', tabId !== 'tab-insights');
+    document.getElementById('transactions-content').classList.toggle('hidden', tabId !== 'tab-transactions');
   }
 
   document.getElementById('tab-active').addEventListener('click', () => {
@@ -544,7 +557,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderInsightsTab();
   });
 
-  // ── Sheet sync (single Sheet ID drives all three tabs) ────────────────────
+  document.getElementById('tab-transactions').addEventListener('click', () => {
+    currentTab = 'transactions';
+    activateTab('tab-transactions');
+    renderTransactionsTab();
+  });
+
+  // ── Sheet sync (single Sheet ID drives all four tabs) ─────────────────────
 
   document.getElementById('save-sheet-btn').addEventListener('click', () => {
     const raw = document.getElementById('sheet-id').value.trim();
@@ -553,9 +572,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     const sheetId = extractSheetId(raw);
     localStorage.setItem('saved_sheet_id', sheetId);
     updateSourcePills();
-    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_ACTIVE_TAB),   'active');
-    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_REALIZED_TAB), 'realized');
-    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_SNAPSHOT_TAB), 'snapshot');
+    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_ACTIVE_TAB),       'active');
+    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_REALIZED_TAB),     'realized');
+    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_SNAPSHOT_TAB),     'snapshot');
+    fetchRemoteCSV(buildSheetCsvUrl(sheetId, SHEET_TRANSACTIONS_TAB), 'transactions');
   });
 
   // ── Offline file upload ───────────────────────────────────────────────────
@@ -643,6 +663,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (writeUrlInput) writeUrlInput.value = '';
     if (writeTokenInput) writeTokenInput.value = '';
     globalSnapshotData = null;
+    globalTransactionLog = [];
     selectedHistoryTickers.clear();
     insightsCache = { news: {}, recommendation: {}, earnings: {} };
     selectedInsightsTicker = null;
@@ -652,6 +673,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     processData(Papa.parse(DEFAULT_REALIZED_DATA, { header: true, skipEmptyLines: true }).data, 'realized');
     if (currentTab === 'history') renderHistoryTab();
     if (currentTab === 'insights') renderInsightsTab();
+    if (currentTab === 'transactions') renderTransactionsTab();
   });
 
   // ── Refresh prices button ─────────────────────────────────────────────────
@@ -732,14 +754,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById(id)?.addEventListener('input', updateSalePreview);
   });
 
-  // ── Date range buttons ────────────────────────────────────────────────────
+  // ── Date range buttons (Portfolio History tab) ─────────────────────────────
+  // Scoped to #history-chart-section specifically — the Transaction Log
+  // tab's Monthly/Yearly toggle below reuses the same .range-btn/
+  // .date-range-group classes for matching visual style, and a plain
+  // `.range-btn` selector here would wrongly intercept clicks on it too
+  // (clobbering activeHistoryRange with undefined).
 
-  document.querySelectorAll('.range-btn').forEach(btn => {
+  document.querySelectorAll('#history-chart-section .range-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
-      document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('#history-chart-section .range-btn').forEach(b => b.classList.remove('active'));
       e.currentTarget.classList.add('active');
       activeHistoryRange = e.currentTarget.dataset.range;
       if (currentTab === 'history') renderHistoryChart();
+    });
+  });
+
+  // ── Monthly/Yearly toggle (Transaction Log tab) ────────────────────────────
+
+  document.querySelectorAll('#txn-view-toggle .range-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      document.querySelectorAll('#txn-view-toggle .range-btn').forEach(b => b.classList.remove('active'));
+      e.currentTarget.classList.add('active');
+      txnChartView = e.currentTarget.dataset.view;
+
+      const yearFilter = document.getElementById('txn-year-filter');
+      if (yearFilter) yearFilter.classList.toggle('hidden', txnChartView === 'yearly');
+
+      const chartTitle = document.getElementById('txn-chart-title');
+      if (chartTitle) {
+        chartTitle.textContent = txnChartView === 'yearly'
+          ? 'Yearly Cash Flow — Buy vs Sell'
+          : 'Monthly Cash Flow — Buy vs Sell';
+      }
+
+      renderTxnMonthlyChart(globalTransactionLog);
     });
   });
 
@@ -750,6 +799,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       const column      = e.target.getAttribute('data-sort');
       const tableId     = e.target.closest('table').id;
       const isRealized  = tableId === 'table-realized';
+      const isTxnLog    = tableId === 'table-transactions';
 
       if (currentSort.column === column && currentSort.table === tableId) {
         currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
@@ -762,7 +812,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       document.querySelectorAll(`#${tableId} th.sortable`).forEach(h => h.classList.remove('sort-asc', 'sort-desc'));
       e.target.classList.add(currentSort.direction === 'asc' ? 'sort-asc' : 'sort-desc');
 
-      const dataTarget = isRealized ? globalRealizedData : globalActiveData;
+      const dataTarget = isTxnLog ? globalTransactionLog : (isRealized ? globalRealizedData : globalActiveData);
       dataTarget.sort((a, b) => {
         let valA = a[column], valB = b[column];
         if (column === 'date') { valA = new Date(valA).getTime() || 0; valB = new Date(valB).getTime() || 0; }
@@ -776,7 +826,10 @@ document.addEventListener('DOMContentLoaded', async () => {
         return currentSort.direction === 'asc' ? valA - valB : valB - valA;
       });
 
-      renderTables(dataTarget, isRealized);
+      if (isTxnLog) transactionsPage = 1; else if (isRealized) realizedPage = 1; else activePage = 1;
+
+      if (isTxnLog) renderTransactionTable(dataTarget);
+      else renderTables(dataTarget, isRealized);
     });
   });
 
@@ -786,9 +839,10 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (savedSheetId) {
     document.getElementById('sheet-id').value = savedSheetId;
-    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_ACTIVE_TAB),   'active');
-    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_REALIZED_TAB), 'realized');
-    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_SNAPSHOT_TAB), 'snapshot');
+    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_ACTIVE_TAB),       'active');
+    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_REALIZED_TAB),     'realized');
+    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_SNAPSHOT_TAB),     'snapshot');
+    fetchRemoteCSV(buildSheetCsvUrl(savedSheetId, SHEET_TRANSACTIONS_TAB), 'transactions');
   } else {
     processData(Papa.parse(DEFAULT_CSV_DATA,      { header: true, skipEmptyLines: true }).data, 'active',   false);
     processData(Papa.parse(DEFAULT_REALIZED_DATA, { header: true, skipEmptyLines: true }).data, 'realized', false);
@@ -980,6 +1034,7 @@ async function processData(data, targetTab, showLoader = true) {
     }
 
     globalActiveData = processedData;
+    activePage = 1;
     if (currentTab === 'active') renderDashboard();
     // If the user already switched to Insights before this (async) load
     // resolved, renderInsightsTab()'s first pass would have built the
@@ -1050,7 +1105,56 @@ async function processData(data, targetTab, showLoader = true) {
 
     globalRealizedData = sortRealizedByDateDesc(processedData);
     selectedRealizedYear = 'All';
+    realizedPage = 1;
     if (currentTab === 'realized') renderDashboard();
+  }
+
+  // ── TRANSACTION LOG ───────────────────────────────────────────────────────
+  // A flat audit trail of every logged Buy/Sell (dividends excluded) —
+  // independent of Active Holdings' cost-basis merging and Realized
+  // History's closed-trade accounting. Mirrors the Realized History branch
+  // above but with its own fields (no category; adds a per-transaction
+  // Total Amount).
+  else if (targetTab === 'transactions') {
+    for (const row of data) {
+      const rawTicker   = findValue(row, ['ticker', 'symbol', 'name']) || 'UNKNOWN';
+      const rowCurrency = (findValue(row, ['currency', 'base']) || 'USD').trim().toUpperCase();
+      const stockName   = nameOf(normalizeTicker(rawTicker, rowCurrency));
+
+      const rawType = findValue(row, ['type']) || '';
+      const type    = rawType.toLowerCase().includes('sell') ? 'Sell' : 'Buy';
+
+      const date   = findValue(row, ['date']) || 'Unknown';
+      const shares = parseNum(findValue(row, ['shares', 'share', 'qty', 'quantity']));
+
+      let price       = parseNum(findValue(row, ['transacted price', 'transaction price', 'price']));
+      let commission  = parseNum(findValue(row, ['commission', 'fee']));
+      let totalAmount = parseNum(findValue(row, ['total amount', 'total']));
+
+      // Older rows (or a hand-edited sheet) might be missing Total Amount —
+      // derive it the same way the backend computes it: cash paid (Buy,
+      // fees included) or net cash received (Sell, fees deducted).
+      if (!totalAmount) {
+        totalAmount = type === 'Buy' ? (shares * price) + commission : (shares * price) - commission;
+      }
+
+      if (rowCurrency === 'SGD' && currentSgdRate > 0) {
+        price       /= currentSgdRate;
+        commission  /= currentSgdRate;
+        totalAmount /= currentSgdRate;
+      }
+
+      processedData.push({
+        date, ticker: rawTicker, stockName, type, shares,
+        price, commission, totalAmount,
+        originalBase: rowCurrency
+      });
+    }
+
+    globalTransactionLog = sortRealizedByDateDesc(processedData);
+    selectedTxnYear = 'All';
+    transactionsPage = 1;
+    if (currentTab === 'transactions') renderTransactionsTab();
   }
 
   if (loader) loader.classList.add('hidden');
@@ -1064,6 +1168,7 @@ function openPurchaseModal() {
 
   document.getElementById('purchase-form')?.reset();
   document.getElementById('purchase-commission').value = 0;
+  document.getElementById('purchase-date').value = new Date().toISOString().split('T')[0];
   hidePurchaseError();
   populatePurchaseCategorySelect();
   updatePurchasePreview();
@@ -1146,6 +1251,7 @@ async function handlePurchaseSubmit(e) {
   const commission  = parseFloat(document.getElementById('purchase-commission').value) || 0;
   const currency    = document.getElementById('purchase-currency').value;
   const category    = document.getElementById('purchase-category').value;
+  const date        = document.getElementById('purchase-date').value || new Date().toISOString().split('T')[0];
 
   if (!ticker || !(shares > 0) || !(totalCost > 0)) {
     showPurchaseError('Enter a ticker, a positive share count, and a positive total cost.');
@@ -1163,16 +1269,16 @@ async function handlePurchaseSubmit(e) {
   submitBtn.disabled = true;
   submitBtn.textContent = 'Logging...';
 
-  const totalCostWithFees = totalCost + commission;
-
   try {
     const res = await fetch(writeUrl, {
       method: 'POST',
       // text/plain avoids a CORS preflight OPTIONS request, which Apps
       // Script Web Apps don't handle — the server parses this as JSON itself.
+      // totalCost here is pre-fee; the backend adds commission itself when
+      // merging into Active Holdings (see handleBuy's totalCostWithFees).
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify({
-        token: writeToken, ticker, shares, totalCost: totalCostWithFees, currency, category
+        token: writeToken, ticker, shares, totalCost, commission, currency, category, date
       })
     });
 
@@ -1192,7 +1298,7 @@ async function handlePurchaseSubmit(e) {
       return;
     }
 
-    applyOptimisticPurchase(ticker, category, currency, body.shares, body.totalCost);
+    applyOptimisticPurchase(ticker, category, currency, body.shares, body.totalCost, { date, shares, totalCost, commission });
     closePurchaseModal();
     alert(`${ticker} recorded to Google Sheet. Local view updated — Sync Active later to confirm against the published CSV.`);
 
@@ -1209,7 +1315,11 @@ async function handlePurchaseSubmit(e) {
 // and enrichment logic instead of duplicating it, and keeps this local view
 // in sync with what the server just wrote (server response is authoritative
 // for the changed ticker's shares/totalCost, in its original currency).
-function applyOptimisticPurchase(ticker, category, currency, serverShares, serverTotalCost) {
+// `txn` carries this specific transaction's own details (date, shares,
+// pre-fee totalCost, commission) for the Transaction Log push below — the
+// server response only echoes the MERGED Active Holdings totals, which
+// can't be used to reconstruct a single transaction's price/commission.
+function applyOptimisticPurchase(ticker, category, currency, serverShares, serverTotalCost, txn) {
   const rawRows = globalActiveData.map(item => ({
     Ticker: item.ticker,
     Category: item.category,
@@ -1237,6 +1347,24 @@ function applyOptimisticPurchase(ticker, category, currency, serverShares, serve
   }
 
   processData(rawRows, 'active');
+
+  let priceUSD = txn.totalCost / txn.shares, commissionUSD = txn.commission,
+      totalAmountUSD = txn.totalCost + txn.commission;
+  if (currency === 'SGD' && currentSgdRate > 0) {
+    priceUSD       /= currentSgdRate;
+    commissionUSD  /= currentSgdRate;
+    totalAmountUSD /= currentSgdRate;
+  }
+
+  globalTransactionLog.push({
+    date: txn.date, ticker, stockName: nameOf(normalizeTicker(ticker, currency)),
+    type: 'Buy', shares: txn.shares, price: priceUSD, commission: commissionUSD,
+    totalAmount: totalAmountUSD, originalBase: currency,
+  });
+  sortRealizedByDateDesc(globalTransactionLog);
+  transactionsPage = 1;
+
+  if (currentTab === 'transactions') renderTransactionsTab();
 }
 
 // ── Log Sale (write-back to Google Sheets) ───────────────────────────────────
@@ -1582,8 +1710,18 @@ function applyOptimisticSale(ticker, category, currency, date, serverResult) {
     originalBase: currency,
   });
   sortRealizedByDateDesc(globalRealizedData);
+  realizedPage = 1;
+
+  globalTransactionLog.push({
+    date, ticker, stockName: nameOf(normalizeTicker(ticker, currency)),
+    type: 'Sell', shares: sharesSold, price: sellPriceUSD, commission: commissionUSD,
+    totalAmount: totalSellUSD - commissionUSD, originalBase: currency,
+  });
+  sortRealizedByDateDesc(globalTransactionLog);
+  transactionsPage = 1;
 
   if (currentTab === 'realized') renderDashboard();
+  if (currentTab === 'transactions') renderTransactionsTab();
 }
 
 // Dividends are cash income, not a disposal — they never touch Active
@@ -1604,6 +1742,7 @@ function applyOptimisticDividend(ticker, category, currency, date, serverResult)
     originalBase: currency,
   });
   sortRealizedByDateDesc(globalRealizedData);
+  realizedPage = 1;
 
   if (currentTab === 'realized') renderDashboard();
 }
@@ -1682,6 +1821,7 @@ function renderYearFilter(data) {
 
   select.addEventListener('change', () => {
     selectedRealizedYear = select.value === 'All' ? 'All' : Number(select.value);
+    realizedPage = 1;
     renderDashboard();
   });
 
@@ -1742,6 +1882,221 @@ function renderMonthlyChart(data) {
   });
 }
 
+// ── Transaction Log: Overview + Monthly Cash Flow + Table ────────────────────
+
+const getTxnYear = (dateStr) => {
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? 'Unknown' : d.getFullYear();
+};
+
+// "Bought"/"Sold" totals are each transaction's own totalAmount (cash paid
+// incl. fees for a Buy, net cash received after fees for a Sell — see
+// processData()'s 'transactions' branch and applyOptimisticPurchase/Sale).
+// Net Invested = Bought − Sold: positive means net money went INTO the
+// portfolio this month, negative means net money came OUT (sold more than
+// bought) — directly answers "did I put in money this month?".
+function computeThisMonthCashFlow(data) {
+  const now = new Date();
+  const year = now.getFullYear(), month = now.getMonth();
+
+  let bought = 0, sold = 0;
+  data.forEach(item => {
+    const d = new Date(item.date);
+    if (isNaN(d.getTime()) || d.getFullYear() !== year || d.getMonth() !== month) return;
+    if (item.type === 'Buy') bought += item.totalAmount || 0;
+    else                     sold   += item.totalAmount || 0;
+  });
+
+  return { bought, sold, net: bought - sold };
+}
+
+function renderThisMonthStat(data) {
+  const { bought, sold, net } = computeThisMonthCashFlow(data);
+
+  const boughtEl = document.getElementById('txn-bought-value');
+  const soldEl    = document.getElementById('txn-sold-value');
+  const netEl     = document.getElementById('txn-net-value');
+  const netBadge  = document.getElementById('txn-net-badge');
+  if (!boughtEl || !soldEl || !netEl || !netBadge) return;
+
+  boughtEl.textContent = formatCurrency(bought);
+  soldEl.textContent    = formatCurrency(sold);
+  netEl.textContent     = `${net >= 0 ? '+' : ''}${formatCurrency(net)}`;
+  netEl.className       = `widget-value ${net >= 0 ? 'profit-positive' : 'profit-negative'}`;
+  netBadge.textContent  = net >= 0 ? 'Net money in' : 'Net money out';
+  netBadge.style.backgroundColor = net >= 0 ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)';
+  netBadge.style.color           = net >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+}
+
+function renderTxnYearFilter(data) {
+  const container = document.getElementById('txn-year-filter');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const years = [...new Set(data.map(item => getTxnYear(item.date)))]
+    .filter(y => y !== 'Unknown')
+    .sort((a, b) => b - a);
+
+  const select = document.createElement('select');
+  select.id        = 'txn-year-select';
+  select.className = 'ticker-select';
+
+  const allOpt = document.createElement('option');
+  allOpt.value       = 'All';
+  allOpt.textContent = 'All Years';
+  select.appendChild(allOpt);
+
+  years.forEach(year => {
+    const opt = document.createElement('option');
+    opt.value       = year;
+    opt.textContent = year;
+    select.appendChild(opt);
+  });
+
+  select.value = selectedTxnYear;
+
+  select.addEventListener('change', () => {
+    selectedTxnYear = select.value === 'All' ? 'All' : Number(select.value);
+    renderTxnMonthlyChart(globalTransactionLog);
+  });
+
+  container.appendChild(select);
+}
+
+function computeTxnMonthlyCashFlow(data, year) {
+  const bought = new Array(12).fill(0);
+  const sold   = new Array(12).fill(0);
+
+  data.forEach(item => {
+    const d = new Date(item.date);
+    if (isNaN(d.getTime())) return;
+    if (year !== 'All' && d.getFullYear() !== year) return;
+
+    const month = d.getMonth();
+    if (item.type === 'Buy') bought[month] += item.totalAmount || 0;
+    else                     sold[month]   += item.totalAmount || 0;
+  });
+
+  return { bought, sold };
+}
+
+// One bar per calendar year (cumulative Buy/Sell totals across every month
+// in that year) — the "Yearly" half of the Monthly/Yearly toggle, so the
+// same chart can answer "how much did I invest in 2025 overall?" without
+// having to add up 12 monthly bars by eye.
+function computeTxnYearlyCashFlow(data) {
+  const map = {};
+  data.forEach(item => {
+    const year = getTxnYear(item.date);
+    if (year === 'Unknown') return;
+    if (!map[year]) map[year] = { bought: 0, sold: 0 };
+    if (item.type === 'Buy') map[year].bought += item.totalAmount || 0;
+    else                     map[year].sold   += item.totalAmount || 0;
+  });
+
+  const years = Object.keys(map).map(Number).sort((a, b) => a - b);
+  return {
+    years,
+    bought: years.map(y => map[y].bought),
+    sold:   years.map(y => map[y].sold),
+  };
+}
+
+function renderTxnMonthlyChart(data) {
+  if (typeof Chart === 'undefined') return;
+  const canvas = document.getElementById('txnMonthlyChart');
+  if (!canvas) return;
+  if (txnMonthlyChartInstance) txnMonthlyChartInstance.destroy();
+
+  let labels, bought, sold;
+  if (txnChartView === 'yearly') {
+    const yearly = computeTxnYearlyCashFlow(data);
+    labels = yearly.years.map(String);
+    bought = yearly.bought;
+    sold   = yearly.sold;
+  } else {
+    const monthly = computeTxnMonthlyCashFlow(data, selectedTxnYear);
+    labels = MONTH_LABELS;
+    bought = monthly.bought;
+    sold   = monthly.sold;
+  }
+
+  txnMonthlyChartInstance = new Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Bought', data: bought, backgroundColor: 'rgba(16,185,129,0.75)', borderRadius: 4, maxBarThickness: 28 },
+        { label: 'Sold',   data: sold,   backgroundColor: 'rgba(239,68,68,0.75)',  borderRadius: 4, maxBarThickness: 28 },
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', labels: { usePointStyle: true, pointStyle: 'circle', padding: 20 } },
+        tooltip: {
+          backgroundColor: 'rgba(15,23,42,0.95)', titleColor: '#fff', bodyColor: '#e2e8f0',
+          borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, padding: 12,
+          callbacks: { label: (ctx) => ` ${ctx.dataset.label}: ${formatCurrency(ctx.raw)}` }
+        }
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { color: '#94a3b8' } },
+        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8', callback: (val) => formatAxisValue(val) } }
+      }
+    }
+  });
+}
+
+function renderTransactionTable(data) {
+  const tbody = document.getElementById('transactions-body');
+  const empty = document.getElementById('transactions-empty');
+  const table = document.getElementById('table-transactions')?.closest('.table-container');
+  if (!tbody) return;
+
+  if (empty) empty.classList.toggle('hidden', data.length > 0);
+  if (table) table.classList.toggle('hidden', data.length === 0);
+
+  const totalPages = Math.max(1, Math.ceil(data.length / PAGE_SIZE));
+  transactionsPage = Math.min(transactionsPage, totalPages);
+  const pageData = data.slice((transactionsPage - 1) * PAGE_SIZE, transactionsPage * PAGE_SIZE);
+
+  renderPagination('transactions-pagination', data.length, transactionsPage, (newPage) => {
+    transactionsPage = newPage;
+    renderTransactionTable(data);
+  });
+
+  tbody.innerHTML = '';
+  pageData.forEach(item => {
+    const isBuy = item.type === 'Buy';
+    const typeBadge = `<span class="type-badge ${isBuy ? 'buy' : 'sell'}">${item.type}</span>`;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="mobile-date">${item.date}</td>
+      <td data-label="Type">${typeBadge}</td>
+      <td class="ticker-cell"><div style="display:flex;flex-direction:column;">
+        <span style="font-weight:600;color:var(--text-primary);font-size:0.95rem;">${item.stockName}</span>
+        <span style="font-size:0.7rem;color:var(--text-secondary);opacity:0.8;">${item.ticker}</span>
+      </div></td>
+      <td data-label="Currency"><span class="currency-badge ${item.originalBase === 'SGD' ? 'sgd' : 'usd'}">${item.originalBase}</span></td>
+      <td data-label="Shares">${item.shares.toLocaleString()}</td>
+      <td data-label="Transacted Price">${formatCurrency(item.price)}</td>
+      <td data-label="Commission">${item.commission > 0 ? formatCurrency(item.commission) : '–'}</td>
+      <td data-label="Total Amount">${formatCurrency(item.totalAmount)}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderTransactionsTab() {
+  renderThisMonthStat(globalTransactionLog);
+  renderTxnYearFilter(globalTransactionLog);
+  renderTxnMonthlyChart(globalTransactionLog);
+  renderTransactionTable(globalTransactionLog);
+}
+
 // ── Dashboard Rendering ───────────────────────────────────────────────────────
 
 function renderDashboard() {
@@ -1750,6 +2105,9 @@ function renderDashboard() {
   // Insights has no currency-dependent content (EPS is reported in the
   // company's own currency, not converted anywhere else in the app either).
   if (currentTab === 'insights') return;
+  // Transaction Log's amounts ARE currency-dependent (formatCurrency), so a
+  // currency toggle needs its own full re-render, same as Active/Realized.
+  if (currentTab === 'transactions') { renderTransactionsTab(); return; }
 
   const isRealized = currentTab === 'realized';
   const data = isRealized ? globalRealizedData : globalActiveData;
@@ -1875,6 +2233,41 @@ function renderDashboard() {
   try { renderChart(tableData, isRealized); } catch (e) { console.error('Chart error', e); }
 }
 
+// ── Pagination ────────────────────────────────────────────────────────────────
+
+// Rebuilds a Prev/Page X of Y/Next bar in `containerId`, hidden entirely
+// when everything fits on one page. `onPageChange` receives the new page
+// number directly (not a delta), and is expected to update the caller's
+// page variable and re-render.
+function renderPagination(containerId, totalItems, currentPage, onPageChange) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+  container.innerHTML = '';
+
+  const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+  if (totalPages <= 1) return;
+
+  const prevBtn = document.createElement('button');
+  prevBtn.className = 'page-btn';
+  prevBtn.textContent = '‹ Prev';
+  prevBtn.disabled = currentPage <= 1;
+  prevBtn.addEventListener('click', () => onPageChange(currentPage - 1));
+
+  const label = document.createElement('span');
+  label.className = 'page-label';
+  label.textContent = `Page ${currentPage} of ${totalPages}`;
+
+  const nextBtn = document.createElement('button');
+  nextBtn.className = 'page-btn';
+  nextBtn.textContent = 'Next ›';
+  nextBtn.disabled = currentPage >= totalPages;
+  nextBtn.addEventListener('click', () => onPageChange(currentPage + 1));
+
+  container.appendChild(prevBtn);
+  container.appendChild(label);
+  container.appendChild(nextBtn);
+}
+
 // ── Table Rendering ───────────────────────────────────────────────────────────
 
 function renderTables(data, isRealized) {
@@ -1887,6 +2280,17 @@ function renderTables(data, isRealized) {
   if (logPurchaseBtn) logPurchaseBtn.classList.toggle('hidden', isRealized);
   if (logSaleBtn)     logSaleBtn.classList.toggle('hidden', isRealized);
 
+  const totalPages = Math.max(1, Math.ceil(data.length / PAGE_SIZE));
+  if (isRealized) realizedPage = Math.min(realizedPage, totalPages);
+  else            activePage   = Math.min(activePage,   totalPages);
+  const page     = isRealized ? realizedPage : activePage;
+  const pageData = data.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  renderPagination('portfolio-pagination', data.length, page, (newPage) => {
+    if (isRealized) realizedPage = newPage; else activePage = newPage;
+    renderTables(data, isRealized);
+  });
+
   if (isRealized) {
     tableActive.classList.add('hidden');
     tableRealized.classList.remove('hidden');
@@ -1895,7 +2299,7 @@ function renderTables(data, isRealized) {
 
     const tbody = document.getElementById('realized-body');
     tbody.innerHTML = '';
-    data.forEach(item => {
+    pageData.forEach(item => {
       const pos   = item.profit >= 0;
       const cls   = pos ? 'profit-positive' : 'profit-negative';
       const sign  = pos ? '+' : '';
@@ -1930,7 +2334,7 @@ function renderTables(data, isRealized) {
 
     const tbody = document.getElementById('holdings-body');
     tbody.innerHTML = '';
-    data.forEach(item => {
+    pageData.forEach(item => {
       const pos  = item.profit >= 0;
       const cls  = pos ? 'profit-positive' : 'profit-negative';
       const sign = pos ? '+' : '';

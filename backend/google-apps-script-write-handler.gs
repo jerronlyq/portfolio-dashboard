@@ -10,8 +10,10 @@
 //                          (powers the Portfolio History tab).
 //   2. doPost()          — the write-back endpoint the dashboard's
 //                          "Log Purchase" / "Log Sale" modals call, which
-//                          updates "Active Holdings" and (for sales)
-//                          appends closed trades to "Realized History".
+//                          updates "Active Holdings", (for sales) appends
+//                          closed trades to "Realized History", and (for
+//                          both) appends an audit-trail row to
+//                          "Transaction Log" (auto-created if missing).
 //
 // Selling requires a "Realized History" tab (see REALIZED_SHEET below) to
 // already exist in the same spreadsheet, with at least Date/Ticker/Shares
@@ -52,9 +54,10 @@
 // you DO need to create a new deployment (or manage versions) for changes
 // to take effect on the existing URL.
 
-const ACTIVE_SHEET   = 'Active Holdings';
-const SNAPSHOT_SHEET = 'Snapshots';
-const REALIZED_SHEET = 'Realized History';
+const ACTIVE_SHEET      = 'Active Holdings';
+const SNAPSHOT_SHEET    = 'Snapshots';
+const REALIZED_SHEET    = 'Realized History';
+const TRANSACTION_SHEET = 'Transactions';
 
 // ── Daily Snapshot ───────────────────────────────────────────────────────────
 
@@ -356,16 +359,58 @@ function findProfitPctCol(headerArr) {
   return findCol(headerArr, 'gain');
 }
 
+// Appends one row to the Transaction Log — a flat audit trail of every
+// logged Buy/Sell, independent of the cost-basis merging/reduction that
+// happens in Active Holdings and Realized History. Auto-creates the sheet
+// with a default header on first use, same pattern as Snapshots in
+// dailySnapshot(). Called from both handleBuy and handleSell.
+function appendTransactionLogRow(ss, { date, type, ticker, currency, shares, pricePerShare, commission, totalAmount }) {
+  let sheet = ss.getSheetByName(TRANSACTION_SHEET);
+  if (!sheet) {
+    sheet = ss.insertSheet(TRANSACTION_SHEET);
+    sheet.appendRow(['Date', 'Type', 'Ticker', 'Currency', 'Shares', 'Transacted Price', 'Commission', 'Total Amount']);
+  }
+
+  const header = sheet.getDataRange().getValues()[0].map(h => String(h).toLowerCase());
+  const cDate       = findCol(header, 'date');
+  const cType       = findCol(header, 'type');
+  const cTicker     = findCol(header, 'ticker') >= 0 ? findCol(header, 'ticker') : findCol(header, 'symbol');
+  const cCurrency   = findCol(header, 'currency');
+  const cShares     = findCol(header, 'share');
+  const cPrice      = findCol(header, 'transacted') >= 0 ? findCol(header, 'transacted') : findCol(header, 'price');
+  const cCommission = findCol(header, 'commission') >= 0 ? findCol(header, 'commission') : findCol(header, 'fee');
+  const cTotal      = findCol(header, 'total');
+
+  const row = new Array(header.length).fill('');
+  if (cDate >= 0)       row[cDate] = date;
+  if (cType >= 0)       row[cType] = type;
+  if (cTicker >= 0)     row[cTicker] = ticker;
+  if (cCurrency >= 0)   row[cCurrency] = currency;
+  if (cShares >= 0)     row[cShares] = shares;
+  if (cPrice >= 0)      row[cPrice] = pricePerShare;
+  if (cCommission >= 0) row[cCommission] = commission;
+  if (cTotal >= 0)      row[cTotal] = totalAmount;
+  sheet.appendRow(row);
+  SpreadsheetApp.flush();
+}
+
 function handleBuy(payload, props) {
-  const ticker    = String(payload.ticker || '').trim().toUpperCase();
-  const shares    = Number(payload.shares);
-  const totalCost = Number(payload.totalCost);
-  const currency  = String(payload.currency || 'USD').trim().toUpperCase();
-  const category  = String(payload.category || 'Other').trim();
+  const ticker     = String(payload.ticker || '').trim().toUpperCase();
+  const shares     = Number(payload.shares);
+  const totalCost  = Number(payload.totalCost);
+  // Backward-compatible: older frontend builds folded commission into
+  // totalCost client-side and never sent this field, so it defaults to 0
+  // and totalCostWithFees below collapses back to the old behavior exactly.
+  const commission = Number(payload.commission) || 0;
+  const currency   = String(payload.currency || 'USD').trim().toUpperCase();
+  const category   = String(payload.category || 'Other').trim();
+  const date       = String(payload.date || '').trim() || new Date().toISOString().split('T')[0];
 
   if (!ticker || !(shares > 0) || !(totalCost > 0)) {
     return jsonResponse({ success: false, error: 'Missing or invalid ticker/shares/totalCost.' });
   }
+
+  const totalCostWithFees = totalCost + commission;
 
   const sheetId = props.getProperty('SHEET_ID');
   const ss = sheetId ? SpreadsheetApp.openById(sheetId) : SpreadsheetApp.getActiveSpreadsheet();
@@ -407,7 +452,7 @@ function handleBuy(payload, props) {
 
     // Merge: sum shares and cost into the existing row (weighted-average cost basis)
     const newShares = Number(existingRow[cShares]) + shares;
-    const newCost   = Number(existingRow[cCost])   + totalCost;
+    const newCost   = Number(existingRow[cCost])   + totalCostWithFees;
     sheet.getRange(rowIndex + 1, cShares + 1).setValue(newShares);
     sheet.getRange(rowIndex + 1, cCost   + 1).setValue(newCost);
     if (cCategory >= 0 && payload.category) {
@@ -415,20 +460,30 @@ function handleBuy(payload, props) {
     }
 
     SpreadsheetApp.flush();
+    appendTransactionLogRow(ss, {
+      date, type: 'Buy', ticker, currency, shares,
+      pricePerShare: totalCost / shares,
+      commission, totalAmount: totalCostWithFees,
+    });
     return jsonResponse({ success: true, action: 'merged', ticker, shares: newShares, totalCost: newCost });
   }
 
   // New ticker — append a row, placing values by the header's actual column order
   const newRow = new Array(header.length).fill('');
   newRow[cTicker] = ticker;
-  newRow[cCost]   = totalCost;
+  newRow[cCost]   = totalCostWithFees;
   newRow[cShares] = shares;
   if (cCategory >= 0) newRow[cCategory] = category;
   if (cCurrency >= 0) newRow[cCurrency] = currency;
   sheet.appendRow(newRow);
 
   SpreadsheetApp.flush();
-  return jsonResponse({ success: true, action: 'appended', ticker, shares, totalCost });
+  appendTransactionLogRow(ss, {
+    date, type: 'Buy', ticker, currency, shares,
+    pricePerShare: totalCost / shares,
+    commission, totalAmount: totalCostWithFees,
+  });
+  return jsonResponse({ success: true, action: 'appended', ticker, shares, totalCost: totalCostWithFees });
 }
 
 // Sells (fully or partially) an existing Active Holdings position:
@@ -568,6 +623,12 @@ function handleSell(payload, props) {
   if (rCurrency >= 0)          newRealizedRow[rCurrency] = currency;
   realizedSheet.appendRow(newRealizedRow);
   SpreadsheetApp.flush();
+
+  appendTransactionLogRow(ss, {
+    date, type: 'Sell', ticker, currency, shares: sharesSold,
+    pricePerShare: sellPricePerShare,
+    commission, totalAmount: totalSell - commission,
+  });
 
   return jsonResponse({
     success: true,
