@@ -381,6 +381,7 @@
       <section class="table-container card">
         <div class="table-header">
           <h2 class="section-title table-header-title">Transaction Log</h2>
+          <div id="txn-month-filter" class="ticker-filter"></div>
         </div>
         <div class="table-responsive">
           <table id="table-transactions">
@@ -405,8 +406,8 @@
       <!-- Empty state (shown when no transactions logged) -->
       <div id="transactions-empty" class="card history-empty hidden">
         <i data-feather="list" class="empty-icon"></i>
-        <p class="empty-title">No transactions logged yet.</p>
-        <p class="empty-sub">Use + Log Purchase / + Log Sale on the Active Portfolio tab — every entry appends here automatically.</p>
+        <p class="empty-title" id="transactions-empty-title">No transactions logged yet.</p>
+        <p class="empty-sub" id="transactions-empty-sub">Use + Log Purchase / + Log Sale on the Active Portfolio tab — every entry appends here automatically.</p>
       </div>
 
     </div>

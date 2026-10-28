@@ -45,6 +45,7 @@ let selectedHistoryTickers = new Set();
 let selectedRealizedYear  = 'All';
 let selectedTxnYear       = 'All';
 let txnChartView          = 'monthly'; // 'monthly' | 'yearly'
+let selectedTxnMonth      = 'All';     // 'All' or a 'YYYY-MM' key — filters the Transaction Log TABLE only, independent of the chart's own year filter above
 
 // Pagination: page 1 is always index 0 of the already-sorted/filtered array.
 // A distinct page counter per table since each paginates independently.
@@ -1153,6 +1154,7 @@ async function processData(data, targetTab, showLoader = true) {
 
     globalTransactionLog = sortRealizedByDateDesc(processedData);
     selectedTxnYear = 'All';
+    selectedTxnMonth = 'All';
     transactionsPage = 1;
     if (currentTab === 'transactions') renderTransactionsTab();
   }
@@ -1889,6 +1891,18 @@ const getTxnYear = (dateStr) => {
   return isNaN(d.getTime()) ? 'Unknown' : d.getFullYear();
 };
 
+// 'YYYY-MM' sorts/compares correctly as a plain string (zero-padded month),
+// which is all the Transaction Log table's month filter needs it for.
+const getTxnMonthKey = (dateStr) => {
+  const d = new Date(dateStr);
+  return isNaN(d.getTime()) ? 'Unknown' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+};
+
+const formatTxnMonthLabel = (monthKey) => {
+  const [year, month] = monthKey.split('-').map(Number);
+  return `${MONTH_LABELS[month - 1]} ${year}`;
+};
+
 // "Bought"/"Sold" totals are each transaction's own totalAmount (cash paid
 // incl. fees for a Buy, net cash received after fees for a Sell — see
 // processData()'s 'transactions' branch and applyOptimisticPurchase/Sale).
@@ -1958,6 +1972,46 @@ function renderTxnYearFilter(data) {
   select.addEventListener('change', () => {
     selectedTxnYear = select.value === 'All' ? 'All' : Number(select.value);
     renderTxnMonthlyChart(globalTransactionLog);
+  });
+
+  container.appendChild(select);
+}
+
+// Filters the Transaction Log TABLE (not the chart above) down to a single
+// calendar month — a plain "January" selector would be ambiguous across
+// years, so each option is a distinct Year+Month actually present in the
+// data (e.g. "October 2026"), newest first.
+function renderTxnMonthFilter(data) {
+  const container = document.getElementById('txn-month-filter');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const monthKeys = [...new Set(data.map(item => getTxnMonthKey(item.date)))]
+    .filter(k => k !== 'Unknown')
+    .sort((a, b) => b.localeCompare(a));
+
+  const select = document.createElement('select');
+  select.id        = 'txn-month-select';
+  select.className = 'ticker-select';
+
+  const allOpt = document.createElement('option');
+  allOpt.value       = 'All';
+  allOpt.textContent = 'All Months';
+  select.appendChild(allOpt);
+
+  monthKeys.forEach(key => {
+    const opt = document.createElement('option');
+    opt.value       = key;
+    opt.textContent = formatTxnMonthLabel(key);
+    select.appendChild(opt);
+  });
+
+  select.value = selectedTxnMonth;
+
+  select.addEventListener('change', () => {
+    selectedTxnMonth = select.value;
+    transactionsPage = 1;
+    renderTransactionTable(globalTransactionLog);
   });
 
   container.appendChild(select);
@@ -2053,17 +2107,34 @@ function renderTxnMonthlyChart(data) {
 function renderTransactionTable(data) {
   const tbody = document.getElementById('transactions-body');
   const empty = document.getElementById('transactions-empty');
+  const emptyTitle = document.getElementById('transactions-empty-title');
+  const emptySub   = document.getElementById('transactions-empty-sub');
   const table = document.getElementById('table-transactions')?.closest('.table-container');
   if (!tbody) return;
 
-  if (empty) empty.classList.toggle('hidden', data.length > 0);
-  if (table) table.classList.toggle('hidden', data.length === 0);
+  // `data` is always the full (sorted) log — filtering by the month
+  // dropdown happens here, not at the call site, so it applies consistently
+  // whether this was triggered by a sort-column click, a page change, or a
+  // fresh render from renderTransactionsTab().
+  const filtered = selectedTxnMonth === 'All'
+    ? data
+    : data.filter(item => getTxnMonthKey(item.date) === selectedTxnMonth);
 
-  const totalPages = Math.max(1, Math.ceil(data.length / PAGE_SIZE));
+  if (empty) empty.classList.toggle('hidden', filtered.length > 0);
+  if (table) table.classList.toggle('hidden', filtered.length === 0);
+  if (filtered.length === 0 && data.length > 0) {
+    if (emptyTitle) emptyTitle.textContent = `No transactions in ${formatTxnMonthLabel(selectedTxnMonth)}.`;
+    if (emptySub)   emptySub.textContent   = 'Pick a different month above, or "All Months" to see everything.';
+  } else {
+    if (emptyTitle) emptyTitle.textContent = 'No transactions logged yet.';
+    if (emptySub)   emptySub.textContent   = 'Use + Log Purchase / + Log Sale on the Active Portfolio tab — every entry appends here automatically.';
+  }
+
+  const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   transactionsPage = Math.min(transactionsPage, totalPages);
-  const pageData = data.slice((transactionsPage - 1) * PAGE_SIZE, transactionsPage * PAGE_SIZE);
+  const pageData = filtered.slice((transactionsPage - 1) * PAGE_SIZE, transactionsPage * PAGE_SIZE);
 
-  renderPagination('transactions-pagination', data.length, transactionsPage, (newPage) => {
+  renderPagination('transactions-pagination', filtered.length, transactionsPage, (newPage) => {
     transactionsPage = newPage;
     renderTransactionTable(data);
   });
@@ -2093,6 +2164,7 @@ function renderTransactionTable(data) {
 function renderTransactionsTab() {
   renderThisMonthStat(globalTransactionLog);
   renderTxnYearFilter(globalTransactionLog);
+  renderTxnMonthFilter(globalTransactionLog);
   renderTxnMonthlyChart(globalTransactionLog);
   renderTransactionTable(globalTransactionLog);
 }
